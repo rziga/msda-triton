@@ -3,6 +3,14 @@ import triton
 from triton import language as tl
 
 
+# How this will go down is:
+#   - we will go batch by batch, query by query and head by head
+#   - (basically batch block size = 1, query block size = 1, head block size = 1)
+#   - that is we will calculate blocks over [B, N, H, ||| L, P]
+#   - that is B, N, H will be 1,1,1 parallelized and L, P will be blocked... ??? !!!
+# TODO: If we make N dimension blocked with block size >= 16, we can use tensor cores !!!
+
+
 @triton.jit()
 def triton_multi_scale_deformable_attention_kernel(
     out_ptr,                # [B, N, H, C]
