@@ -1,66 +1,76 @@
 import torch
+from torch.nn import functional as F
 
-from msda_triton.triton.msda_fw import triton_deformable_att
+from msda_triton.triton.msda_fw import triton_multi_scale_deformable_attention
 
 def test_kernel():
-    img = torch.rand(6, 128, 128, 256).cuda()
-    sampling_points = torch.rand(6, 128, 4, 2).cuda()
-    att_weights = torch.rand(6, 128, 4).cuda()
+    # Define input dimensions
+    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
+    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+
+    # Generate test inputs
+    img = torch.randn(B, I, H, C, device="cuda")
+    img_shapes = torch.tensor(img_shapes).to("cuda")
+    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda")
+    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda"), dim=-1)
     
-    true = torch_deformable_att(img, sampling_points, att_weights)
-    test = triton_deformable_att(img, sampling_points, att_weights)
+    true = torch_multi_scale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+    test = triton_multi_scale_deformable_attention(img, img_shapes, sampling_points, att_weights)
 
     torch.testing.assert_close(test, true)
 
-def torch_deformable_att(img, sampling_points, att_weights):
-    """
-    img - [B, H, W, C]
-    sampling_points - [B, N, P, 2] in xy relative [0-1]
-    att_weights - [B, N, P]
 
-    outputs: samples - [B, N, C]
-    """
-    B, H, W, C = img.shape
-    B, N, P, _ = sampling_points.shape
-    device = img.device
+############################
+### Native torch version ###
+############################
+
+def torch_multi_scale_deformable_attention(
+    value: torch.Tensor,
+    value_spatial_shapes: torch.Tensor,
+    sampling_locations: torch.Tensor,
+    attention_weights: torch.Tensor,
+) -> torch.Tensor:
     
-    # unnormalize coordinates
-    x, y = sampling_points.unbind(-1)
-    x = x * (W-1) # [B, N, P]
-    y = y * (H-1) # [B, N, P]
-
-    # get idxs for interpolation
-    xl = x.floor().long()
-    xr = xl + 1
-    xr_ = xr.clamp(max=W-1)
-    yt = y.floor().long()
-    yb = yt + 1
-    yb_ = yb.clamp(max=H-1)
+    batch_size, _, num_heads, hidden_dim = value.shape
+    _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
+    value_list = value.split([height * width for height, width in value_spatial_shapes], dim=1)
+    sampling_grids = 2 * sampling_locations - 1
+    sampling_value_list = []
     
-    # get the interpolation point values
-    b = torch.arange(B, device=device)[:, None, None]
-    point_tl, point_tr = img[b, yt , xl, :], img[b, yt , xr_, :] # [B, N, P, C], [B, N, P, C]
-    point_bl, point_br = img[b, yb_, xl, :], img[b, yb_, xr_, :] # [B, N, P, C], [B, N, P, C]
-    #print("point:")
-    #print(point_tl, point_tr)
-    #print(point_bl, point_br)
-
-    # get the interpolation weights
-    weight_tl, weight_tr = (yb-y)*(xr-x), (yb-y)*(x-xl) # [B, N, P], [B, N, P]
-    weight_bl, weight_br = (y-yt)*(xr-x), (y-yt)*(x-xl) # [B, N, P], [B, N, P]
-    #print("weight:")
-    #print(weight_tl, weight_tr)
-    #print(weight_bl, weight_br)
+    for level_id, (height, width) in enumerate(value_spatial_shapes):
+        
+        # batch_size, height*width, num_heads, hidden_dim
+        # -> batch_size, height*width, num_heads*hidden_dim
+        # -> batch_size, num_heads*hidden_dim, height*width
+        # -> batch_size*num_heads, hidden_dim, height, width
+        value_l_ = (
+            value_list[level_id]
+            .flatten(2)
+            .transpose(1, 2)
+            .reshape(batch_size * num_heads, hidden_dim, height, width)
+        )
+        
+        # batch_size, num_queries, num_heads, num_points, 2
+        # -> batch_size, num_heads, num_queries, num_points, 2
+        # -> batch_size*num_heads, num_queries, num_points, 2
+        sampling_grid_l_ = sampling_grids[:, :, :, level_id].transpose(1, 2).flatten(0, 1)
+        
+        # batch_size*num_heads, hidden_dim, num_queries, num_points
+        sampling_value_l_ = F.grid_sample(
+            value_l_, sampling_grid_l_, mode="bilinear", align_corners=True
+        )
+        sampling_value_list.append(sampling_value_l_)
     
-    # interpolate the result
-    samples = (
-          weight_tl[..., None]*point_tl + weight_tr[..., None]*point_tr
-        + weight_bl[..., None]*point_bl + weight_br[..., None]*point_br
-    ) # [B, N, P, C]
-    #print(samples)
-
-    # use attention weights
-    weighted = (samples * att_weights[..., None]).sum(-2) # [B, N, C]
-    #print(weighted)
-
-    return weighted
+    # (batch_size, num_queries, num_heads, num_levels, num_points)
+    # -> (batch_size, num_heads, num_queries, num_levels, num_points)
+    # -> (batch_size, num_heads, 1, num_queries, num_levels*num_points)
+    attention_weights = attention_weights.transpose(1, 2).reshape(
+        batch_size * num_heads, 1, num_queries, num_levels * num_points
+    )
+    output = (
+        (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
+        .sum(-1)
+        .view(batch_size, num_heads * hidden_dim, num_queries)
+    )
+    return output.transpose(1, 2).contiguous()
