@@ -9,6 +9,7 @@ from triton import language as tl
 #   - that is we will calculate blocks over [B, N, H, ||| L, P]
 #   - that is B, N, H will be 1,1,1 parallelized and L, P will be blocked... ??? !!!
 # TODO: If we make N dimension blocked with block size >= 16, we can use tensor cores !!!
+# TODO: this is essentially padding mode == border because I clamp the sampling points
 
 
 @triton.jit()

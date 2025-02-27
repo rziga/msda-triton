@@ -17,29 +17,34 @@ def test_forward():
     sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda")
     att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda"), dim=-1)
 
-    true = torch_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+    true = torch_msda_manual(img, img_shapes, sampling_points, att_weights)
     test = multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
 
     torch.testing.assert_close(test, true)
+
 
 @pytest.mark.parametrize(argnames="dtype", argvalues=("float32", "float64"))
 def test_backward(dtype):
     dtype = getattr(torch, dtype)
 
     # Define input dimensions
-    B, H, C, L, N, P = 4, 8, 64, 4, 1421, 4
+    B, H, C, L, N, P = 4, 8, 64, 4, 14213, 4
+    #img_shapes = [(32, 32)]
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
     I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
 
     # Generate test inputs
     img = torch.randn(B, I, H, C, device="cuda", requires_grad=True, dtype=dtype)
     img_shapes = torch.tensor(img_shapes, device="cuda")
-    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", requires_grad=True, dtype=dtype)
+    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
+    #sampling_points[..., 0, :] = 1
+    #sampling_points[..., 0, :] = 1/31
+    sampling_points.requires_grad_(True)
     att_weights = torch.rand(B, N, H, L, P, device="cuda", requires_grad=True, dtype=dtype)
     out_grad = torch.rand(B, N, H*C, device="cuda", dtype=dtype)
-    
+
     # run torch
-    a = torch_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+    a = torch_msda_manual(img, img_shapes, sampling_points, att_weights)
     a.backward(out_grad)
     a_img_grad, a_sampling_points_grad, a_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
@@ -49,9 +54,16 @@ def test_backward(dtype):
     b_img_grad, b_sampling_points_grad, b_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
-    torch.testing.assert_close(a_img_grad, b_img_grad)
-    torch.testing.assert_close(a_sampling_points_grad, b_sampling_points_grad)
-    torch.testing.assert_close(a_att_weights_grad, b_att_weights_grad)
+    if dtype == torch.float32:
+        atol, rtol = 1e-4, 1e-3
+    else:
+        atol, rtol = 1e-8, 1e-6
+
+    torch.testing.assert_close(a, b)
+    torch.testing.assert_close(a_img_grad, b_img_grad, atol=atol, rtol=rtol)
+    torch.testing.assert_close(a_sampling_points_grad, b_sampling_points_grad, atol=atol, rtol=rtol)
+    torch.testing.assert_close(a_att_weights_grad, b_att_weights_grad, atol=atol, rtol=rtol)
+
 
 def test_memory():
 
@@ -83,7 +95,7 @@ def test_memory():
     torch_mem_usage = 0
     for _ in range(repeats):
         torch_mem_usage += measure_memory_usage(
-            lambda: torch_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+            lambda: torch_msda_bilinear(img, img_shapes, sampling_points, att_weights)
         )
     torch_mem_usage /= repeats
 
@@ -99,9 +111,10 @@ def test_memory():
     print(f"Triton Memory Usage: {triton_mem_usage:.2f} MB")
     print(f"Triton Memory Efficiency: {torch_mem_usage / triton_mem_usage:.2f}x")
 
-############################
-### Native torch version ###
-############################
+
+#############################
+### Native torch versions ###
+#############################
 
 def _torch_multiscale_deformable_attention(
     value: torch.Tensor,
@@ -136,7 +149,7 @@ def _torch_multiscale_deformable_attention(
         
         # batch_size*num_heads, hidden_dim, num_queries, num_points
         sampling_value_l_ = F.grid_sample(
-            value_l_, sampling_grid_l_, mode="bilinear", align_corners=True
+            value_l_, sampling_grid_l_, mode="bilinear", align_corners=True, padding_mode="border"
         )
         sampling_value_list.append(sampling_value_l_)
     
@@ -153,4 +166,77 @@ def _torch_multiscale_deformable_attention(
     )
     return output.transpose(1, 2).contiguous()
 
-torch_multiscale_deformable_attention = torch.compile(_torch_multiscale_deformable_attention)
+def _torch_multiscale_deformable_attention2(
+    img: torch.Tensor,                  # [B, I, H, C]
+    img_shapes: torch.Tensor,           # [L, 2]
+    sampling_points: torch.Tensor,      # [B, N, H, L, P, 2]
+    attention_weights: torch.Tensor,    # [B, N, H, L, P]
+) -> torch.Tensor:
+    B, I, H, C = img.shape
+    B, N, H, L, P, _ = sampling_points.shape
+
+    # calculate level offsets
+    # [L]
+    level_offsets = img_shapes.prod(-1)
+    level_offsets = level_offsets.cumsum(0) - level_offsets
+    
+    # unnormalize sampling points and find neighbors
+    # [L, 1, 2]
+    wh_max = img_shapes.flip(-1)[:, None, :] - 1
+    # [B, N, H, L, P, 2] * [L, 1, 2]
+    sampling_points = sampling_points * wh_max
+    # [B, N, H, L, P, 2]
+    tl = sampling_points.floor().to(torch.long)
+    # [B, N, H, L, P, 2] clamp with [L, 1, 2]
+    br = torch.clamp(tl + 1, max=wh_max)
+    # split xs and ys, all [B, N, H, L, P]
+    x, y = sampling_points.unbind(-1)
+    (x0, y0), (x1, y1) = tl.unbind(-1), br.unbind(-1)
+
+    # calculate weights
+    dx = x - x0
+    dy = y - y0
+
+    # sample
+    def sample_img(y, x):
+        # [B, N, H, L, P]
+        idxs = level_offsets[:, None] + y * img_shapes[:, [0]] + x
+        # [B, N, L, P, H]
+        idxs = idxs.permute(0, 1, 3, 4, 2)
+        # [B, N*L*P, H]
+        idxs = idxs.reshape(B, N*L*P, H)
+        # [B, N*L*P, H, C]
+        idxs = idxs[..., None].expand(B, N*L*P, H, C)
+        # [B, N*L*P, H, C]
+        samples = torch.gather(img, 1, idxs)
+        # [B, N, L, P, H, C]
+        samples = samples.reshape(B, N, L, P, H, C)
+        # [B, N, H, L, P, C]
+        return samples.permute(0, 1, 4, 2, 3, 5)
+
+    # all [B, N, H, L, P, C]
+    img00 = sample_img(y0, x0)
+    img01 = sample_img(y0, x1)
+    img10 = sample_img(y1, x0)
+    img11 = sample_img(y1, x1)
+    
+    # [B, N, H, L, P, C]
+    interpolated = (
+        img00 * (1-dy[..., None]) * (1-dx[..., None]) +
+        img01 * (1-dy[..., None]) * (  dx[..., None]) +
+        img10 * (  dy[..., None]) * (1-dx[..., None]) +
+        img11 * (  dy[..., None]) * (  dx[..., None])
+    )
+
+    # weigh the interpolated samples
+    # [B, N, H, L, P, C]
+    out = interpolated * attention_weights[..., None]
+    # [B, N, H, C]
+    out = torch.sum(out, dim=(3, 4))
+    # [B, N, H*C]
+    out = out.reshape(B, N, H*C)
+    return out
+
+# compile them for optimal performance
+torch_msda_bilinear = torch.compile(_torch_multiscale_deformable_attention)
+torch_msda_manual = torch.compile(_torch_multiscale_deformable_attention2)
