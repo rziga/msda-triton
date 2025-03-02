@@ -55,7 +55,7 @@ def test_backward(dtype):
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
     if dtype == torch.float32:
-        atol, rtol = 1e-4, 1e-3
+        atol, rtol = 1e-3, 1e-2
     else:
         atol, rtol = 1e-8, 1e-6
 

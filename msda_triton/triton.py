@@ -11,9 +11,89 @@ from triton import language as tl
 # TODO: If we make N dimension blocked with block size >= 16, we can use tensor cores !!!
 # TODO: this is essentially padding mode == border because I clamp the sampling points
 
-#def sample_bilinear(
-#    
-#)
+
+@triton.jit()
+def sample_bilinear(
+    x, y, w, h, level_start_idx,
+    
+    img_ptr,
+
+    B, I, C, N, H, L, P,
+    
+    bid, nid, hid,
+
+    BLOCK_SIZE_L: tl.constexpr,
+    BLOCK_SIZE_P: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+
+    RETURN_FOR_BACKWARD: tl.constexpr
+):
+    # unnormalize, make sure that w and h are not 0
+    x *= tl.maximum(0, w[:, None] - 1)
+    y *= tl.maximum(0, h[:, None] - 1)
+
+    # find neighbors
+    x0 = tl.floor(x).to(tl.int32)
+    y0 = tl.floor(y).to(tl.int32)
+    x1 = tl.minimum(x0+1, w[:, None]-1)
+    y1 = tl.minimum(y0+1, h[:, None]-1)
+
+    # calculate mask and ptr offsets
+    mask = (
+          (tl.arange(0, BLOCK_SIZE_L)[:, None, None] < L)
+        & (tl.arange(0, BLOCK_SIZE_P)[None, :, None] < P)
+        & (tl.arange(0, BLOCK_SIZE_C)[None, None, :] < C) 
+    )
+    img_offset = img_ptr + bid*I*H*C
+    
+    # all [L, P, C]
+    img00_offsets = (
+        (level_start_idx[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
+        + hid*C                                                             #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+    )
+    img01_offsets = (
+        (level_start_idx[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
+        + hid*C                                                             #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+    )
+    img10_offsets = (
+        (level_start_idx[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
+        + hid*C                                                             #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+    )
+    img11_offsets = (
+        (level_start_idx[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
+        + hid*C                                                             #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+    )
+    
+    # all [L, P, C]
+    img00 = tl.load(img_offset + img00_offsets, mask)
+    img01 = tl.load(img_offset + img01_offsets, mask)
+    img10 = tl.load(img_offset + img10_offsets, mask)
+    img11 = tl.load(img_offset + img11_offsets, mask)
+
+    # bilinear interpolation
+    # [L, P, 1]
+    dx = (x - x0)[:, :, None]
+    # [L, P, 1]
+    dy = (y - y0)[:, :, None]
+    # [L, P, C] -> [L*P, C]
+    samples = (
+          img00 * (1 - dy) * (1 - dx)
+        + img01 * (1 - dy) * (    dx)
+        + img10 * (    dy) * (1 - dx)
+        + img11 * (    dy) * (    dx)
+    ).reshape(BLOCK_SIZE_L*BLOCK_SIZE_P, BLOCK_SIZE_C)
+
+    return (
+        samples,
+        img00, img01, img10, img11,
+        dx, dy,
+        img00_offsets, img01_offsets, img10_offsets, img11_offsets,
+        mask,
+    ) if RETURN_FOR_BACKWARD else samples
 
 
 @triton.jit()
@@ -50,11 +130,10 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
 
     # load sampling points
     # [1, 1, 1, L, P, 2]
-    b_str, n_str, h_str, l_str, p_str, d_str = N*H*L*P*2, H*L*P*2, L*P*2, P*2, 2, 1
     sampling_points_ptrs = tl.make_block_ptr(
         sampling_points_ptr,
         shape=(B, N, H, L, P, 2),
-        strides=(b_str, n_str, h_str, l_str, p_str, d_str),
+        strides=(N*H*L*P*2, H*L*P*2, L*P*2, P*2, 2, 1),
         offsets=(bid, nid, hid, 0, 0, 0),
         block_shape=(1, 1, 1, BLOCK_SIZE_L, BLOCK_SIZE_P, 2),
         order=(0, 1, 2, 3, 4, 5)
@@ -67,67 +146,21 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     # [L, P], [L, P]
     x, y = tl.split(sampling_points)
 
-    # unnormalize, make sure that w and h are not 0
-    x *= tl.maximum(0, w[:, None] - 1)
-    y *= tl.maximum(0, h[:, None] - 1)
-
-    # find neighbors
-    x0 = tl.floor(x).to(tl.int32)
-    y0 = tl.floor(y).to(tl.int32)
-    x1 = tl.minimum(x0+1, w[:, None]-1)
-    y1 = tl.minimum(y0+1, h[:, None]-1)
-
-    # now we load the pixels
-    mask = (
-          (tl.arange(0, BLOCK_SIZE_L)[:, None, None] < L)
-        & (tl.arange(0, BLOCK_SIZE_P)[None, :, None] < P)
-        & (tl.arange(0, BLOCK_SIZE_C)[None, None, :] < C) 
+    # bilinear sampling
+    samples = sample_bilinear(
+        x, y, w, h, level_start_idx, 
+        img_ptr, 
+        B, I, C, N, H, L, P, 
+        bid, nid, hid, 
+        BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+        RETURN_FOR_BACKWARD=False,
     )
-    img_offsets = img_ptr + bid*I*H*C
-    # [L, P, C]
-    img00 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img01 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img10 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img11 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-
-    # bilinear interpolation
-    # [L, P, 1]
-    dx = (x - x0)[:, :, None]
-    # [L, P, 1]
-    dy = (y - y0)[:, :, None]
-    # [L, P, C] -> [L*P, C]
-    samples = (
-          img00 * (1 - dy) * (1 - dx)
-        + img01 * (1 - dy) * (    dx)
-        + img10 * (    dy) * (1 - dx)
-        + img11 * (    dy) * (    dx)
-    ).reshape(BLOCK_SIZE_L*BLOCK_SIZE_P, BLOCK_SIZE_C)
 
     # load the attention weights
-    str_b, str_n, str_h, str_l, str_p = N*H*L*P, H*L*P, L*P, P, 1
     attention_weights_ptrs = tl.make_block_ptr(
         attention_weights_ptr, 
         shape=(B, N, H, L, P),
-        strides=(str_b, str_n, str_h, str_l, str_p),
+        strides=(N*H*L*P, H*L*P, L*P, P, 1),
         offsets=(bid, nid, hid, 0, 0),
         block_shape=(1, 1, 1, BLOCK_SIZE_L, BLOCK_SIZE_P),
         order=(0, 1, 2, 3, 4),
@@ -141,11 +174,10 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     out = tl.sum(attention_weights[:, None] * samples, axis=0)
 
     # write the output
-    str_b, str_n, str_h, str_c = N*H*C, H*C, C, 1
     out_ptrs = tl.make_block_ptr(
         out_ptr,
         shape=(B, N, H, C),
-        strides=(str_b, str_n, str_h, str_c),
+        strides=(N*H*C, H*C, C, 1),
         offsets=(bid, nid, hid, 0),
         block_shape=(1, 1, 1, BLOCK_SIZE_C),
         order=(0, 1, 2, 3),
@@ -247,60 +279,21 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     # [L, P], [L, P]
     x, y = tl.split(sampling_points)
 
-    # unnormalize, make sure that w and h are not 0
-    x *= tl.maximum(0, w[:, None] - 1)
-    y *= tl.maximum(0, h[:, None] - 1)
-
-    # find neighbors
-    x0 = tl.floor(x).to(tl.int32)
-    y0 = tl.floor(y).to(tl.int32)
-    x1 = tl.minimum(x0+1, w[:, None]-1)
-    y1 = tl.minimum(y0+1, h[:, None]-1)
-
-    # now we load the pixels
-    mask = (
-          (tl.arange(0, BLOCK_SIZE_L)[:, None, None] < L)
-        & (tl.arange(0, BLOCK_SIZE_P)[None, :, None] < P)
-        & (tl.arange(0, BLOCK_SIZE_C)[None, None, :] < C) 
+    # bilinear sampling
+    (
+        samples,
+        img00, img01, img10, img11,
+        dx, dy,
+        img00_offsets, img01_offsets, img10_offsets, img11_offsets,
+        mask,
+    ) = sample_bilinear(
+        x, y, w, h, level_start_idx, 
+        img_ptr, 
+        B, I, C, N, H, L, P, 
+        bid, nid, hid, 
+        BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+        RETURN_FOR_BACKWARD=True,
     )
-    img_offsets = img_ptr + bid*I*H*C
-    # [L, P, C]
-    img00 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img01 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img10 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-    # [L, P, C]
-    img11 = tl.load(img_offsets + (
-        (level_start_idx[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), mask)
-
-    # bilinear interpolation
-    # [L, P, 1]
-    dx = (x - x0)[:, :, None]
-    # [L, P, 1]
-    dy = (y - y0)[:, :, None]
-    # [L, P, C] -> [L*P, C]
-    samples = (
-          img00 * (1 - dy) * (1 - dx)
-        + img01 * (1 - dy) * (    dx)
-        + img10 * (    dy) * (1 - dx)
-        + img11 * (    dy) * (    dx)
-    ).reshape(BLOCK_SIZE_L*BLOCK_SIZE_P, BLOCK_SIZE_C)
 
     # load the attention weights
     attention_weights_ptrs = tl.make_block_ptr(
@@ -375,37 +368,19 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
 
     # calculate and store img grad
     # now we load the pixels
-    mask = (
-          (tl.arange(0, BLOCK_SIZE_L)[:, None, None] < L)
-        & (tl.arange(0, BLOCK_SIZE_P)[None, :, None] < P)
-        & (tl.arange(0, BLOCK_SIZE_C)[None, None, :] < C) 
-    )
     img_grad_offset = img_grad_ptr + bid*I*H*C
     # all [L, P, C]
     img00_grad = out_grad * attention_weights[:, :, None] * (1-dy) * (1-dx)
     img01_grad = out_grad * attention_weights[:, :, None] * (1-dy) * (  dx)
     img10_grad = out_grad * attention_weights[:, :, None] * (  dy) * (1-dx)
     img11_grad = out_grad * attention_weights[:, :, None] * (  dy) * (  dx)
-    tl.atomic_add(img_grad_offset + (
-        (level_start_idx[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), img00_grad, mask)
-    tl.atomic_add(img_grad_offset + (
-        (level_start_idx[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), img01_grad, mask)
-    tl.atomic_add(img_grad_offset + (
-        (level_start_idx[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), img10_grad, mask)
-    tl.atomic_add(img_grad_offset + (
-        (level_start_idx[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
-    ), img11_grad, mask)
+    
+    # store to output tensor
+    # NOTE: atomic_add here since multiple queries can sample the same pixel
+    tl.atomic_add(img_grad_offset + img00_offsets, img00_grad, mask)
+    tl.atomic_add(img_grad_offset + img01_offsets, img01_grad, mask)
+    tl.atomic_add(img_grad_offset + img10_offsets, img10_grad, mask)
+    tl.atomic_add(img_grad_offset + img11_offsets, img11_grad, mask)
 
 
 def triton_multi_scale_deformable_attention_bwd(
