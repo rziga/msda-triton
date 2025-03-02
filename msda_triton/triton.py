@@ -11,6 +11,10 @@ from triton import language as tl
 # TODO: If we make N dimension blocked with block size >= 16, we can use tensor cores !!!
 # TODO: this is essentially padding mode == border because I clamp the sampling points
 
+#def sample_bilinear(
+#    
+#)
+
 
 @triton.jit()
 def triton_multi_scale_deformable_attention_fwd_kernel(
@@ -26,8 +30,8 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     BLOCK_SIZE_P: tl.constexpr,
 ):
     # block ids
-    bid = tl.program_id(0)
-    nid = tl.program_id(1)
+    nid = tl.program_id(0)
+    bid = tl.program_id(1)
     hid = tl.program_id(2)
 
     # load shapes
@@ -166,7 +170,7 @@ def triton_multi_scale_deformable_attention_fwd(
 
     # run the kernel
     out = img.new_empty(B, N, H, C)
-    triton_multi_scale_deformable_attention_fwd_kernel[B, N, H](
+    triton_multi_scale_deformable_attention_fwd_kernel[N, B, H](
         out, 
         img.contiguous(), 
         sampling_points.contiguous(),
@@ -203,8 +207,8 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     BLOCK_SIZE_P: tl.constexpr,
 ):
     # block ids
-    bid = tl.program_id(0)
-    nid = tl.program_id(1)
+    nid = tl.program_id(0)
+    bid = tl.program_id(1)
     hid = tl.program_id(2)
 
     #####################
@@ -425,7 +429,7 @@ def triton_multi_scale_deformable_attention_bwd(
     attention_weights_grad = torch.zeros_like(attention_weights)
 
     # run the kernel
-    triton_multi_scale_deformable_attention_bwd_kernel[B, N, H](
+    triton_multi_scale_deformable_attention_bwd_kernel[N, B, H](
         img_grad.contiguous(),
         sampling_points_grad.contiguous(),
         attention_weights_grad.contiguous(),

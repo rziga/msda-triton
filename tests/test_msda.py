@@ -38,7 +38,7 @@ def test_backward(dtype):
     img_shapes = torch.tensor(img_shapes, device="cuda")
     sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
     #sampling_points[..., 0, :] = 1
-    #sampling_points[..., 0, :] = 1/31
+    sampling_points[..., 0, :] = 1/31
     sampling_points.requires_grad_(True)
     att_weights = torch.rand(B, N, H, L, P, device="cuda", requires_grad=True, dtype=dtype)
     out_grad = torch.rand(B, N, H*C, device="cuda", dtype=dtype)
