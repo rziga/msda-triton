@@ -21,6 +21,8 @@ Running the same benchmark for CUDA I get:
 
 *Results obtained on my RTX 2060 (gpu poor).*
 
+> **Note**
+> This version uses `padding_mode = "border"`, while the original version uses `padding_mode = "zeros"`, so they are likely not 1-1 compatible.
 
 ## Installation
 
