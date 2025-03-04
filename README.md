@@ -105,3 +105,7 @@ uv install --dev
 ## Contributing
 
 The kernels are very basic. This is pretty much my first experience with triton. I have tested the functions as much as I could, but there could still be some issues. Performance can definitely be improved. Feel free to open an issue and/or submit improvements.
+
+## License
+
+[MIT](LICENSE)
