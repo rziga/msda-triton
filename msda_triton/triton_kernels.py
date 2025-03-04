@@ -103,15 +103,22 @@ def sample_bilinear(
 ):
     # unnormalize, make sure that w and h are not 0
     # both [L, P]
-    x *= tl.maximum(0, w[:, None] - 1)
-    y *= tl.maximum(0, h[:, None] - 1)
+    x = x * (w[:, None] - 1)
+    y = y * (h[:, None] - 1)
 
     # find neighbors
     # all [L, P]
-    x0 = tl.floor(x).to(tl.int32)
-    y0 = tl.floor(y).to(tl.int32)
-    x1 = tl.minimum(x0+1, w[:, None]-1)
-    y1 = tl.minimum(y0+1, h[:, None]-1)
+    x0 = tl.floor(x)
+    y0 = tl.floor(y)
+    x1 = tl.minimum(x0 + 1, w[:, None] - 1)
+    y1 = tl.minimum(y0 + 1, h[:, None] - 1)
+
+    # clamp them
+    # all [L, P]
+    x0 = tl.clamp(x0, 0, w[:, None] - 1).to(tl.int32)
+    x1 = tl.clamp(x1, 0, w[:, None] - 1).to(tl.int32)
+    y0 = tl.clamp(y0, 0, h[:, None] - 1).to(tl.int32)
+    y1 = tl.clamp(y1, 0, h[:, None] - 1).to(tl.int32)
 
     # calculate mask
     # [L, P, C]
@@ -127,23 +134,23 @@ def sample_bilinear(
     # all [L, P, C]
     img00_offsets = (
         (level_offsets[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+        + hid*C                                                           #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
     )
     img01_offsets = (
         (level_offsets[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+        + hid*C                                                           #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
     )
     img10_offsets = (
         (level_offsets[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+        + hid*C                                                           #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
     )
     img11_offsets = (
         (level_offsets[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                             #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                        #       [C]
+        + hid*C                                                           #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
     )
 
     # all [L, P, C]

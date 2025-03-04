@@ -79,9 +79,9 @@ def multiscale_deformable_attention(
         output (torch.Tensor): Output tensor of shape `[batch_size, num_queries, num_heads, num_channels]`.
     """
     try:
-        triton_multiscale_deformable_attention(img, img_shapes, sampling_points, attention_weights)
+        return triton_multiscale_deformable_attention(img, img_shapes, sampling_points, attention_weights)
     except Exception:
-        native_multiscale_deformable_attention(img, img_shapes, sampling_points, attention_weights)
+        return native_multiscale_deformable_attention(img, img_shapes, sampling_points, attention_weights)
 
 
 class MultiscaleDeformableAttention(nn.Module):
@@ -96,7 +96,7 @@ class MultiscaleDeformableAttention(nn.Module):
         self.num_heads = num_heads
         self.num_points = num_points
         self.img_input_proj = nn.Linear(emb_dim, hidden_dim)
-        self.query_input_proj = nn.Linear(emb_dim, hidden_dim*num_levels*num_points*3)
+        self.query_input_proj = nn.Linear(emb_dim, num_heads*num_levels*num_points*3)
         self.query_output_proj = nn.Linear(hidden_dim, emb_dim)
 
     def forward(
@@ -154,4 +154,5 @@ class MultiscaleDeformableAttention(nn.Module):
         # [B, N, H, C//H] -> [B, N, C]
         out = multiscale_deformable_attention(img, shapes, sampling_points, attention_weights)
         out = out.reshape(B, N, C)
+        out = self.query_output_proj(out)
         return out
