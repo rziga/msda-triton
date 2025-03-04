@@ -88,11 +88,11 @@ def make_output_block_ptr(
 @triton.jit()
 def sample_bilinear(
     x, y, w, h, level_offsets,
-    
+
     img_ptr,
 
     B, I, C, N, H, L, P,
-    
+
     bid, nid, hid,
 
     BLOCK_SIZE_L: tl.constexpr,
@@ -110,8 +110,8 @@ def sample_bilinear(
     # all [L, P]
     x0 = tl.floor(x)
     y0 = tl.floor(y)
-    x1 = tl.minimum(x0 + 1, w[:, None] - 1)
-    y1 = tl.minimum(y0 + 1, h[:, None] - 1)
+    x1 = x0 + 1
+    y1 = y0 + 1
 
     # clamp them
     # all [L, P]
