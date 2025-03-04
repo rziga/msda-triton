@@ -2,10 +2,11 @@ import torch
 from torch.nn import functional as F
 import pytest
 
-from msda_triton import multiscale_deformable_attention
+from msda_triton.autograd_function import triton_multiscale_deformable_attention
+from msda_triton.torch_frontend import native_multiscale_deformable_attention 
 
 
-def test_forward():
+def test_triton_forward():
     # Define input dimensions
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
@@ -17,8 +18,26 @@ def test_forward():
     sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda")
     att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda"), dim=-1)
 
-    true = torch_msda_manual(img, img_shapes, sampling_points, att_weights)
-    test = multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights)
+    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+
+    torch.testing.assert_close(test, true)
+
+
+def test_native_forward():
+    # Define input dimensions
+    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
+    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+
+    # Generate test inputs
+    img = torch.randn(B, I, H, C, device="cuda")
+    img_shapes = torch.tensor(img_shapes).to("cuda")
+    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda")
+    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda"), dim=-1)
+
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights)
+    test = native_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
 
     torch.testing.assert_close(test, true)
 
@@ -41,7 +60,7 @@ def test_backward(dtype):
     sampling_points[..., 0, :] = 1/31
     sampling_points.requires_grad_(True)
     att_weights = torch.rand(B, N, H, L, P, device="cuda", requires_grad=True, dtype=dtype)
-    out_grad = torch.rand(B, N, H*C, device="cuda", dtype=dtype)
+    out_grad = torch.rand(B, N, H, C, device="cuda", dtype=dtype)
 
     # run torch
     a = torch_msda_manual(img, img_shapes, sampling_points, att_weights)
@@ -49,7 +68,7 @@ def test_backward(dtype):
     a_img_grad, a_sampling_points_grad, a_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
-    b = multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
+    b = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
     b.backward(out_grad)
     b_img_grad, b_sampling_points_grad, b_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
@@ -65,57 +84,14 @@ def test_backward(dtype):
     torch.testing.assert_close(a_att_weights_grad, b_att_weights_grad, atol=atol, rtol=rtol)
 
 
-def test_memory():
-
-    # Define input dimensions
-    B, H, C, L, N, P = 4, 8, 32, 4, 20000, 4
-    img_shapes = [(128, 128), (64, 64), (32, 32), (16, 16)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
-
-    # Generate test inputs
-    img = torch.randn(B, I, H, C, device="cuda", requires_grad=True)
-    img_shapes = torch.tensor(img_shapes, device="cuda")
-    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", requires_grad=True)
-    att_weights = torch.rand(B, N, H, L, P, device="cuda", requires_grad=True)
-    
-    def measure_memory_usage(func, *args, **kwargs):
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()  # Reset peak memory tracking
-        start_mem = torch.cuda.memory_allocated()
-        
-        out = func(*args, **kwargs)  # Run the function
-        out.sum().backward()
-        
-        torch.cuda.synchronize()
-        max_mem = torch.cuda.max_memory_allocated()  # Get peak memory usage
-        return (max_mem - start_mem) / 1e6  # Convert bytes to MB
-
-    # Benchmarking memory usage for PyTorch implementation
-    repeats = 100
-    torch_mem_usage = 0
-    for _ in range(repeats):
-        torch_mem_usage += measure_memory_usage(
-            lambda: torch_msda_bilinear(img, img_shapes, sampling_points, att_weights)
-        )
-    torch_mem_usage /= repeats
-
-    # Benchmarking memory usage for Triton implementation
-    triton_mem_usage = 0
-    for _ in range(repeats):
-        triton_mem_usage += measure_memory_usage(
-            lambda: multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights)
-        )
-    triton_mem_usage /= 100
-
-    print(f"PyTorch Memory Usage: {torch_mem_usage:.2f} MB")
-    print(f"Triton Memory Usage: {triton_mem_usage:.2f} MB")
-    print(f"Triton Memory Efficiency: {torch_mem_usage / triton_mem_usage:.2f}x")
-
-
 #############################
 ### Native torch versions ###
 #############################
 
+
+# Modified from huggingface transformers implementation
+# which is licensed under Apache 2.0 license
+# original at: https://github.com/huggingface/transformers/blob/f51ac9e059a78049362803c1d606a2c6a8160ee4/src/transformers/models/grounding_dino/modeling_grounding_dino.py#L584-L747
 def _torch_multiscale_deformable_attention(
     value: torch.Tensor,
     value_spatial_shapes: torch.Tensor,
@@ -164,7 +140,8 @@ def _torch_multiscale_deformable_attention(
         .sum(-1)
         .view(batch_size, num_heads * hidden_dim, num_queries)
     )
-    return output.transpose(1, 2).contiguous()
+    return output.transpose(1, 2).reshape(batch_size, num_queries, num_heads, hidden_dim).contiguous()
+
 
 def _torch_multiscale_deformable_attention2(
     img: torch.Tensor,                  # [B, I, H, C]
@@ -233,8 +210,6 @@ def _torch_multiscale_deformable_attention2(
     out = interpolated * attention_weights[..., None]
     # [B, N, H, C]
     out = torch.sum(out, dim=(3, 4))
-    # [B, N, H*C]
-    out = out.reshape(B, N, H*C)
     return out
 
 # compile them for optimal performance

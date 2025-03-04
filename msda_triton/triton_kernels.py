@@ -274,7 +274,7 @@ def triton_multi_scale_deformable_attention_fwd(
         triton.next_power_of_2(P),
     )
 
-    return out.reshape(B, N, H*C)
+    return out
 
 
 @triton.jit()
