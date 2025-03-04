@@ -15,7 +15,10 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.1",
     "numpy>=2.2.3",
+    "pandas>=2.2.3",
     "pytest>=8.3.5",
     "setuptools>=75.8.2",
     "torch>=2.1.0",

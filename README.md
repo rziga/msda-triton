@@ -2,14 +2,49 @@
 
 A very naive implementation of multiscale deformable attention in triton.
 
+
+## Performance
+
+Here is a performance comparison with the PyTorch-native multiscale deformable attention:
+
+<p align="center">
+  <img src="assets/images/msda fwd runtime (ms).png" width="30%" />
+  <img src="assets/images/msda fwd+bwd runtime (ms).png" width="30%" />
+  <img src="assets/images/msda memory consumption (MB).png" width="30%" />
+</p>
+
+The results are also in line with the [original CUDA implementation](https://github.com/fundamentalvision/Deformable-DETR/tree/main/models/ops) from deformable DETR.
+Running the same benchmark for CUDA I get:
+* FWD with 10k queries: 5.37 ms in CUDA vs. 4.81 ms in Triton.
+* FWD+BWD with 10k queries: 28.04 ms in CUDA vs. 24.95 ms in Triton.
+* Memory with 10k queries: 166.14 MB in CUDA vs 166.14 MB in Triton.
+
+*Results obtained on my RTX 2060 (gpu poor).*
+
+
 ## Installation
+
 
 ### 1. Install PyTorch & Triton
 
 This package **requires PyTorch and Triton**, but does not install them automatically.
-Make sure you have PyTorch installed before proceeding.  
+Make sure you have them installed before proceeding.  
 
-Install PyTorch following the instructions at [pytorch.org](https://pytorch.org/get-started/locally/).
+Check if Pytorch is installed with:
+```sh
+python -c "import torch; print(torch.__version__)"
+```
+It should print something like `2.6.0+cu124`.
+If it does not, follow the [install instructions](https://pytorch.org/get-started/locally/).
+
+Triton can already come bundled with PyTorch.
+Check if it is installed with:
+```sh
+python -c "import triton; print(triton.__version__)"
+```
+It should print something like `3.2.0`.
+If it does not, follow the [install instructions](https://triton-lang.org/main/getting-started/installation.html).
+
 
 ### 2. Install this package
 
@@ -28,13 +63,28 @@ or using `uv`:
 uv install
 ```
 
+
 ### 3. Run tests
 
 You need to install `pytest` to run the tests in the `tests` directory.
 
+Then run:
 ```sh
 pytest ./tests
 ```
+
+> **Note**  
+> The `float32` backward test sometimes fails on my machine. I have spent quite a lot of time debugging this and came to the conclusion that it's probably due to rounding errors when doing bilinear sampling. 
+
+
+### 4. Run benchmark
+
+To run the benchmark:
+```sh
+python scripts/benchmark
+```
+The results will be printed in terminal and saved in `outputs/benchmakr_resuls` folder.
+
 
 ### Debugging
 
@@ -48,6 +98,7 @@ or using `uv`:
 ```sh
 uv install --dev
 ```
+
 
 ## Contributing
 

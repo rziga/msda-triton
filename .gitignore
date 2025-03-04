@@ -1,0 +1,6 @@
+__pycache__/
+.vscode/
+packarije*
+original/
+.venv/
+outputs/
