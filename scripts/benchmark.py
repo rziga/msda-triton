@@ -16,7 +16,7 @@ triton.testing.Benchmark(
     line_vals=["triton", "torch"],  # Possible values for `line_arg`.
     line_names=["Triton", "Torch"],  # Label name for the lines.
     styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="runtime (ms)",  # Label name for the y-axis.
+    ylabel="fwd runtime (ms)",  # Label name for the y-axis.
     plot_name="msda fwd runtime (ms)",  # Name for the plot. Used also as a file name for saving the plot.
     args={},  # Values for function arguments not in `x_names` and `y_name`.
 ))
@@ -62,7 +62,7 @@ triton.testing.Benchmark(
     line_vals=["triton", "torch"],  # Possible values for `line_arg`.
     line_names=["Triton", "Torch"],  # Label name for the lines.
     styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="runtime (ms)",  # Label name for the y-axis.
+    ylabel="fwd+bwd runtime (ms)",  # Label name for the y-axis.
     plot_name="msda fwd+bwd runtime (ms)",  # Name for the plot. Used also as a file name for saving the plot.
     args={},  # Values for function arguments not in `x_names` and `y_name`.
 ))
@@ -112,7 +112,7 @@ triton.testing.Benchmark(
     line_vals=["triton", "torch"],  # Possible values for `line_arg`.
     line_names=["Triton", "Torch"],  # Label name for the lines.
     styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="memory consuption (MB)",  # Label name for the y-axis.
+    ylabel="memory consumption (MB)",  # Label name for the y-axis.
     plot_name="msda memory consumption (MB)",  # Name for the plot. Used also as a file name for saving the plot.
     args={},  # Values for function arguments not in `x_names` and `y_name`.
 ))

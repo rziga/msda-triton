@@ -83,7 +83,7 @@ pytest ./tests
 
 To run the benchmark:
 ```sh
-python scripts/benchmark
+python scripts/benchmark.py
 ```
 The results will be printed in terminal and saved in `outputs/benchmakr_resuls` folder.
 
