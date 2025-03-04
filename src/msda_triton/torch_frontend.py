@@ -7,7 +7,7 @@ from torch.nn import functional as F
 try:
     from .autograd_function import triton_multiscale_deformable_attention
 except ModuleNotFoundError:
-    warnings.warn("Could not import custom kernel. Please make sure triton is installed.")
+    warnings.warn("Could not import custom kernel. Please make sure PyTorch and Triton are installed correctly.")
 
 
 def native_multiscale_deformable_attention(
@@ -72,7 +72,7 @@ def multiscale_deformable_attention(
     Args:
         img (torch.Tensor): Flattened image pyramid tensor of shape `[batch_size, num_image, num_head, num_channel]`, where `num_image=sum(h[i]*w[i] for i in range(levels))`
         img_shapes (torch.Tensor): Shapes of each pyramid level tensor of shape `[num_levels, 2]`, in (height, width) order.
-        sampling_points (torch.Tensor): Sampling points tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points, 2]`, in (x, y) order, where x and y \in [0-1]. 
+        sampling_points (torch.Tensor): Sampling points tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points, 2]`, in (x, y) order, where x and y in [0-1]. 
         attention_weights (torch.Tensor): Attention weights tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points]`.
     
     Returns:

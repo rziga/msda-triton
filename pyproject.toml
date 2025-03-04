@@ -1,0 +1,22 @@
+[project]
+name = "msda-triton"
+version = "0.1.0"
+description = "Multiscale deformable attention kernels in Triton with PyTorch interface."
+readme = "README.md"
+authors = [
+    { name = "Ziga R.", email = "102856773+rziga@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "numpy>=2.2.3",
+    "pytest>=8.3.5",
+    "setuptools>=75.8.2",
+    "torch>=2.1.0",
+]
