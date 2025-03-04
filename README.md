@@ -60,10 +60,6 @@ and install using `pip`:
 ```sh
 pip install .
 ```
-or using `uv`:
-```sh
-uv install
-```
 
 
 ### 3. Run tests
@@ -81,7 +77,9 @@ pytest ./tests
 
 ### 4. Run benchmark
 
-To run the benchmark:
+To run the benchmark, you also need matplotlib and pandas.
+
+Then run:
 ```sh
 python scripts/benchmark.py
 ```
@@ -98,7 +96,7 @@ pip install -e .[dev]
 ```
 or using `uv`:
 ```sh
-uv install --dev
+uv sync --dev
 ```
 
 
