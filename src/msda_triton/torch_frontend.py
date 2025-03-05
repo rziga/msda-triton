@@ -102,7 +102,7 @@ class MultiscaleDeformableAttention(nn.Module):
     def forward(
         self,
         img: torch.Tensor, 
-        shapes: torch.Tensor,
+        img_shapes: torch.Tensor,
         queries: torch.Tensor,
         reference_points: torch.Tensor,
     ) -> torch.Tensor:
@@ -113,10 +113,10 @@ class MultiscaleDeformableAttention(nn.Module):
         Perform multiscale deformable attention like described in https://arxiv.org/abs/2010.04159.
 
         Args:
-            img (torch.Tensor): Flattened image pyramid tensor of shape `[batch_size, num_image, num_channels]`, where `num_image` is the total pixel count for all levels.
-            shapes (torch.Tensor): 2D shapes of the feature pyramid levels of shape `[num_levels, 2]`.
-            queries (torch.Tensor): Latent queries of shape `[batch_size, num_queries, num_channels]` which are projected for sampling offsets and attention weights.
-            reference_points (torch.Tensor): Positions of queries of shape `[batch_size, num_queries, 2]` or `[batch_size, num_queries, 4]`.
+            img (torch.Tensor): Flattened image pyramid - tensor of shape `[batch_size, num_image, num_channels]`, where `num_image` is the total pixel count for all levels.
+            img_shapes (torch.Tensor): 2D shapes of the feature pyramid levels - tensor of shape `[num_levels, 2]`.
+            queries (torch.Tensor): Latent queries - tensor of shape `[batch_size, num_queries, num_channels]` which are projected for sampling offsets and attention weights.
+            reference_points (torch.Tensor): XY positions of queries - tensor of shape `[batch_size, num_queries, 2]` or `[batch_size, num_queries, 4]`.
 
         Returns:
             output (torch.Tensor): Samples aggregated based on attention weights of shape `[batch_size, num_queries, num_channels]`.
@@ -141,18 +141,25 @@ class MultiscaleDeformableAttention(nn.Module):
             attention_weights.reshape(B, N, H, L*P), dim=-1).reshape(B, N, H, L, P)
 
         # calculate sampling points
-        # [B, N, 1, 1, 1, 2] + [B, N, H, L, P, 2] -> [B, N, H, L, P, 2]
         last_dim = reference_points.shape[-1]
         if last_dim == 2:
-            sampling_points = reference_points[:, :, None, None, None, :] + offsets
+            # [B, N, 1, 1, 1, 2] + [B, N, H, L, P, 2] * [L, 1, 2] -> [B, N, H, L, P, 2]
+            sampling_points = (
+                reference_points[:, :, None, None, None, :]
+                + offsets / img_shapes[:, None, :]
+            )
         elif last_dim == 4:
-            pass
+            # [B N, 1, 1, 1, 2] + [B, N, H, L, P, 2] * [B N, 1, 1, 1, 2] -> [B, N, H, L, P, 2]
+            sampling_points = (
+                reference_points[:, :, None, None, None, :2] 
+                + offsets / reference_points[:, :, None, None, None, 2:]
+            )
         else:
             raise ValueError(f"`reference_points` should have the last dim either 2 or 4, but got {last_dim}.")
 
         # deformable attention
         # [B, N, H, C//H] -> [B, N, C]
-        out = multiscale_deformable_attention(img, shapes, sampling_points, attention_weights)
+        out = multiscale_deformable_attention(img, img_shapes, sampling_points, attention_weights)
         out = out.reshape(B, N, C)
         out = self.query_output_proj(out)
         return out

@@ -118,8 +118,8 @@ def test_backward(dtype):
     torch.testing.assert_close(a_att_weights_grad, b_att_weights_grad, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_nnmodule(device):
+@pytest.mark.parametrize("device,coors", [("cpu", 2), ("cuda", 2), ("cuda", 4)])
+def test_nnmodule(device, coors):
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
     I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
@@ -128,7 +128,7 @@ def test_nnmodule(device):
     img = torch.randn(B, I, H*C, device=device)
     img_shapes = torch.tensor(img_shapes).to(device)
     queries = torch.rand(B, N, H*C, device=device)
-    reference_points = torch.rand(B, N, 2, device=device)
+    reference_points = torch.rand(B, N, coors, device=device)
 
     module = MultiscaleDeformableAttention(H*C, H*C, L, H, P).to(device)
     module.forward(img, img_shapes, queries, reference_points)
