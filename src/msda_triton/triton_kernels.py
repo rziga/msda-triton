@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 import triton
 from triton import language as tl
@@ -99,7 +101,9 @@ def sample_bilinear(
     BLOCK_SIZE_P: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
 
-    RETURN_FOR_BACKWARD: tl.constexpr
+    PADDING_MODE: tl.constexpr,
+
+    RETURN_FOR_BACKWARD: tl.constexpr,
 ):
     # unnormalize, make sure that w and h are not 0
     # both [L, P]
@@ -113,12 +117,21 @@ def sample_bilinear(
     x1 = x0 + 1
     y1 = y0 + 1
 
+    # calculate mask for zeroing out elements
+    if PADDING_MODE == "border":
+        pass
+    elif PADDING_MODE == "zeros":
+        x0_mask = (0 <= x0) & (x0 <= (w[:, None] - 1))
+        x1_mask = (0 <= x1) & (x1 <= (w[:, None] - 1))
+        y0_mask = (0 <= y0) & (y0 <= (h[:, None] - 1))
+        y1_mask = (0 <= y1) & (y1 <= (h[:, None] - 1))
+
     # clamp them
     # all [L, P]
-    x0 = tl.clamp(x0, 0, w[:, None] - 1).to(tl.int32)
-    x1 = tl.clamp(x1, 0, w[:, None] - 1).to(tl.int32)
-    y0 = tl.clamp(y0, 0, h[:, None] - 1).to(tl.int32)
-    y1 = tl.clamp(y1, 0, h[:, None] - 1).to(tl.int32)
+    x0_c = tl.clamp(x0, 0, w[:, None] - 1).to(tl.int32)
+    x1_c = tl.clamp(x1, 0, w[:, None] - 1).to(tl.int32)
+    y0_c = tl.clamp(y0, 0, h[:, None] - 1).to(tl.int32)
+    y1_c = tl.clamp(y1, 0, h[:, None] - 1).to(tl.int32)
 
     # calculate mask
     # [L, P, C]
@@ -133,24 +146,24 @@ def sample_bilinear(
 
     # all [L, P, C]
     img00_offsets = (
-        (level_offsets[:, None] + y0*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                           #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
+        (level_offsets[:, None] + y0_c*w[:, None] + x0_c)[:, :, None] * H*C     # [L, P, 1]
+        + hid*C                                                                 #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                            #       [C]
     )
     img01_offsets = (
-        (level_offsets[:, None] + y0*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                           #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
+        (level_offsets[:, None] + y0_c*w[:, None] + x1_c)[:, :, None] * H*C     # [L, P, 1]
+        + hid*C                                                                 #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                            #       [C]
     )
     img10_offsets = (
-        (level_offsets[:, None] + y1*w[:, None] + x0)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                           #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
+        (level_offsets[:, None] + y1_c*w[:, None] + x0_c)[:, :, None] * H*C     # [L, P, 1]
+        + hid*C                                                                 #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                            #       [C]
     )
     img11_offsets = (
-        (level_offsets[:, None] + y1*w[:, None] + x1)[:, :, None] * H*C   # [L, P, 1]
-        + hid*C                                                           #       [1]
-        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
+        (level_offsets[:, None] + y1_c*w[:, None] + x1_c)[:, :, None] * H*C     # [L, P, 1]
+        + hid*C                                                                 #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                            #       [C]
     )
 
     # all [L, P, C]
@@ -158,6 +171,22 @@ def sample_bilinear(
     img01 = tl.load(img_offset + img01_offsets, mask)
     img10 = tl.load(img_offset + img10_offsets, mask)
     img11 = tl.load(img_offset + img11_offsets, mask)
+
+    # handle oob elements
+    if PADDING_MODE == "border":
+        img00_mask = mask
+        img01_mask = mask
+        img10_mask = mask
+        img11_mask = mask
+    elif PADDING_MODE == "zeros":
+        img00_mask = (y0_mask & x0_mask)[:, :, None] & mask
+        img01_mask = (y0_mask & x1_mask)[:, :, None] & mask
+        img10_mask = (y1_mask & x0_mask)[:, :, None] & mask
+        img11_mask = (y1_mask & x1_mask)[:, :, None] & mask
+        img00 = tl.where(img00_mask, img00, 0)
+        img01 = tl.where(img01_mask, img01, 0)
+        img10 = tl.where(img10_mask, img10, 0)
+        img11 = tl.where(img11_mask, img11, 0)
 
     # bilinear interpolation
     # [L, P, 1]
@@ -177,7 +206,7 @@ def sample_bilinear(
         img00, img01, img10, img11,
         dx, dy,
         img00_offsets, img01_offsets, img10_offsets, img11_offsets,
-        mask,
+        img00_mask, img01_mask, img10_mask, img11_mask,
     ) if RETURN_FOR_BACKWARD else samples
 
 
@@ -192,6 +221,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
+    PADDING_MODE: tl.constexpr,
 ):
     # block ids
     nid = tl.program_id(0)
@@ -228,6 +258,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
         B, I, C, N, H, L, P, 
         bid, nid, hid, 
         BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+        PADDING_MODE,
         RETURN_FOR_BACKWARD=False,
     )
 
@@ -262,6 +293,7 @@ def triton_multi_scale_deformable_attention_fwd(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    padding_mode: Literal["border", "zeros"],
 ) -> torch.Tensor:
 
     B, I, H, C = img.shape
@@ -279,6 +311,7 @@ def triton_multi_scale_deformable_attention_fwd(
         triton.next_power_of_2(C),
         triton.next_power_of_2(L),
         triton.next_power_of_2(P),
+        padding_mode,
     )
 
     return out
@@ -300,6 +333,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
+    PADDING_MODE: tl.constexpr,
 ):
     # block ids
     nid = tl.program_id(0)
@@ -338,13 +372,14 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
         img00, img01, img10, img11, # [L, P]
         dx, dy,                     # [L, P]
         img00_offsets, img01_offsets, img10_offsets, img11_offsets, # [L, P, C]
-        mask, # [L, P, C]
+        img00_mask, img01_mask, img10_mask, img11_mask, # [L, P, C]
     ) = sample_bilinear(
         x, y, w, h, level_offsets, 
         img_ptr, 
         B, I, C, N, H, L, P, 
         bid, nid, hid, 
         BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+        PADDING_MODE,
         RETURN_FOR_BACKWARD=True,
     )
 
@@ -424,10 +459,10 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
 
     # store to output tensor
     # NOTE: atomic_add here since multiple queries can sample the same pixel
-    tl.atomic_add(img_grad_offset + img00_offsets, img00_grad, mask)
-    tl.atomic_add(img_grad_offset + img01_offsets, img01_grad, mask)
-    tl.atomic_add(img_grad_offset + img10_offsets, img10_grad, mask)
-    tl.atomic_add(img_grad_offset + img11_offsets, img11_grad, mask)
+    tl.atomic_add(img_grad_offset + img00_offsets, img00_grad, img00_mask)
+    tl.atomic_add(img_grad_offset + img01_offsets, img01_grad, img01_mask)
+    tl.atomic_add(img_grad_offset + img10_offsets, img10_grad, img10_mask)
+    tl.atomic_add(img_grad_offset + img11_offsets, img11_grad, img11_mask)
 
 
 def triton_multi_scale_deformable_attention_bwd(
@@ -436,6 +471,7 @@ def triton_multi_scale_deformable_attention_bwd(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    padding_mode: Literal["border", "zeros"],
 ) -> torch.Tensor:
 
     B, I, H, C = img.shape
@@ -460,6 +496,7 @@ def triton_multi_scale_deformable_attention_bwd(
         triton.next_power_of_2(C),
         triton.next_power_of_2(L),
         triton.next_power_of_2(P),
+        padding_mode,
     )
 
     return img_grad, sampling_points_grad, attention_weights_grad

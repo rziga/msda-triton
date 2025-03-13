@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from torch.autograd.function import Function, once_differentiable
 
@@ -12,6 +14,7 @@ def triton_multiscale_deformable_attention(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    padding_mode: Literal["border", "zeros"],
 ) -> torch.Tensor:
 
     # Check input dtypes
@@ -34,6 +37,7 @@ def triton_multiscale_deformable_attention(
         img_shapes,
         sampling_points,
         attention_weights,
+        padding_mode,
     )
 
 
@@ -46,10 +50,12 @@ class _TritonMultiscaleDeformableAttentionFunction(Function):
         img_shapes: torch.Tensor,
         sampling_points: torch.Tensor,
         attention_weights: torch.Tensor,
+        padding_mode: Literal["border", "zeros"],
     ) -> torch.Tensor:
         ctx.save_for_backward(img, img_shapes, sampling_points, attention_weights)
+        ctx.padding_mode = padding_mode
         out = triton_multi_scale_deformable_attention_fwd(
-            img, img_shapes, sampling_points, attention_weights
+            img, img_shapes, sampling_points, attention_weights, padding_mode
         )
         return out
     
@@ -60,7 +66,8 @@ class _TritonMultiscaleDeformableAttentionFunction(Function):
         out_grad: torch.Tensor,
     ) -> tuple[torch.Tensor, None, torch.Tensor, torch.Tensor]:
         img, img_shapes, sampling_points, attention_weights = ctx.saved_tensors
+        padding_mode = ctx.padding_mode
         img_grad, sampling_points_grad, attention_weights_grad = triton_multi_scale_deformable_attention_bwd(
-            out_grad, img, img_shapes, sampling_points, attention_weights
+            out_grad, img, img_shapes, sampling_points, attention_weights, padding_mode
         )
-        return img_grad, None, sampling_points_grad, attention_weights_grad
+        return img_grad, None, sampling_points_grad, attention_weights_grad, None
