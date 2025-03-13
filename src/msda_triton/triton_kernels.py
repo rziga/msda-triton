@@ -102,13 +102,18 @@ def sample_bilinear(
     BLOCK_SIZE_C: tl.constexpr,
 
     PADDING_MODE: tl.constexpr,
+    ALIGN_CORNERS: tl.constexpr,
 
     RETURN_FOR_BACKWARD: tl.constexpr,
 ):
     # unnormalize, make sure that w and h are not 0
     # both [L, P]
-    x = x * (w[:, None] - 1)
-    y = y * (h[:, None] - 1)
+    if ALIGN_CORNERS:
+        x = x * (w[:, None] - 1)
+        y = y * (h[:, None] - 1)
+    else:
+        x = x * w[:, None] - 0.5
+        y = y * h[:, None] - 0.5
 
     # find neighbors
     # all [L, P]
@@ -222,6 +227,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
     PADDING_MODE: tl.constexpr,
+    ALIGN_CORNERS: tl.constexpr,
 ):
     # block ids
     nid = tl.program_id(0)
@@ -259,6 +265,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
         bid, nid, hid, 
         BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
         PADDING_MODE,
+        ALIGN_CORNERS,
         RETURN_FOR_BACKWARD=False,
     )
 
@@ -294,6 +301,7 @@ def triton_multi_scale_deformable_attention_fwd(
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
     padding_mode: Literal["border", "zeros"],
+    align_corners: bool,
 ) -> torch.Tensor:
 
     B, I, H, C = img.shape
@@ -312,6 +320,7 @@ def triton_multi_scale_deformable_attention_fwd(
         triton.next_power_of_2(L),
         triton.next_power_of_2(P),
         padding_mode,
+        align_corners,
     )
 
     return out
@@ -333,7 +342,9 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
+
     PADDING_MODE: tl.constexpr,
+    ALIGN_CORNERS: tl.constexpr,
 ):
     # block ids
     nid = tl.program_id(0)
@@ -380,6 +391,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
         bid, nid, hid, 
         BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
         PADDING_MODE,
+        ALIGN_CORNERS,
         RETURN_FOR_BACKWARD=True,
     )
 
@@ -425,13 +437,23 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     tl.store(attention_weights_grad_ptrs, attention_weights_grad, boundary_check=(3, 4))
 
     # calculate sampling points grad
+
+    # [L, P]
     attention_weights = attention_weights.reshape(BLOCK_SIZE_L, BLOCK_SIZE_P)
+
+    if ALIGN_CORNERS:
+        x_scale = (w[:, None, None] - 1)
+        y_scale = (h[:, None, None] - 1)
+    else:
+        x_scale = w[:, None, None]
+        y_scale = h[:, None, None]
+
     # [L, P, C] sum -> [L, P]
-    x_grad = tl.sum(out_grad * attention_weights[:, :, None] * (w[:, None, None] - 1) * (
+    x_grad = tl.sum(out_grad * attention_weights[:, :, None] * x_scale * (
         (1-dy) * (img01-img00) + dy * (img11-img10)
     ), axis=2)
     # [L, P, C] sum -> [L, P]
-    y_grad = tl.sum(out_grad * attention_weights[:, :, None] * (h[:, None, None] - 1) * (
+    y_grad = tl.sum(out_grad * attention_weights[:, :, None] * y_scale * (
         (1-dx) * (img10-img00) + dx * (img11-img01)
     ), axis=2)
     # [L, P, 2]
@@ -472,6 +494,7 @@ def triton_multi_scale_deformable_attention_bwd(
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
     padding_mode: Literal["border", "zeros"],
+    align_corners: bool,
 ) -> torch.Tensor:
 
     B, I, H, C = img.shape
@@ -497,6 +520,7 @@ def triton_multi_scale_deformable_attention_bwd(
         triton.next_power_of_2(L),
         triton.next_power_of_2(P),
         padding_mode,
+        align_corners,
     )
 
     return img_grad, sampling_points_grad, attention_weights_grad

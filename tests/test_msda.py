@@ -10,13 +10,14 @@ from msda_triton.torch_frontend import native_multiscale_deformable_attention, M
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode",
+    argnames="dtype,padding_mode,align_corners",
     argvalues=product(
         ["float32", "float64"],
-        ["border", "zeros"]
+        ["border", "zeros"],
+        [True, False],
     )
 )
-def test_triton_forward(dtype, padding_mode):
+def test_triton_forward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
     # define input dimensions
@@ -30,8 +31,8 @@ def test_triton_forward(dtype, padding_mode):
     sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
     att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
 
-    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode)
-    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode)
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
+    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
     if dtype == torch.float32:
         atol, rtol = 1e-4, 1e-5
@@ -41,13 +42,14 @@ def test_triton_forward(dtype, padding_mode):
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode",
+    argnames="dtype,padding_mode,align_corners",
     argvalues=product(
         ["float32", "float64"],
-        ["border", "zeros"]
+        ["border", "zeros"],
+        [True, False],
     )
 )
-def test_triton_forward_oob_sampling(dtype, padding_mode):
+def test_triton_forward_oob_sampling(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
     # define input dimensions
@@ -65,8 +67,8 @@ def test_triton_forward_oob_sampling(dtype, padding_mode):
     #sampling_points[..., 0, :, 1] = 0.01
     att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
 
-    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode)
-    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode)
+    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
     if dtype == torch.float32:
         atol, rtol = 1e-3, 1e-2
@@ -76,13 +78,14 @@ def test_triton_forward_oob_sampling(dtype, padding_mode):
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode",
+    argnames="dtype,padding_mode,align_corners",
     argvalues=product(
         ["float32", "float64"],
-        ["border", "zeros"]
+        ["border", "zeros"],
+        [True, False],
     )
 )
-def test_native_forward(dtype, padding_mode):
+def test_native_forward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
     # define input dimensions
@@ -96,20 +99,21 @@ def test_native_forward(dtype, padding_mode):
     sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
     att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
 
-    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode)
-    test = native_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode)
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
+    test = native_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
     torch.testing.assert_close(test, true)
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode",
+    argnames="dtype,padding_mode,align_corners",
     argvalues=product(
         ["float32", "float64"],
-        ["border", "zeros"]
+        ["border", "zeros"],
+        [True, False],
     )
 )
-def test_backward(dtype, padding_mode):
+def test_backward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
     # define input dimensions
@@ -128,12 +132,12 @@ def test_backward(dtype, padding_mode):
     out_grad = torch.rand(B, N, H, C, device="cuda", dtype=dtype)
 
     # run torch
-    a = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode)
+    a = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
     a.backward(out_grad)
     a_img_grad, a_sampling_points_grad, a_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
-    b = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode)
+    b = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
     b.backward(out_grad)
     b_img_grad, b_sampling_points_grad, b_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
@@ -170,7 +174,7 @@ def test_nnmodule(device, coors):
     queries = torch.rand(B, N, H*C, device=device)
     reference_points = torch.rand(B, N, coors, device=device)
 
-    module = MultiscaleDeformableAttention(H*C, H*C, L, H, P, padding_mode="border").to(device)
+    module = MultiscaleDeformableAttention(H*C, H*C, L, H, P, padding_mode="border", align_corners=True).to(device)
     module.forward(img, img_shapes, queries, reference_points)
 
 
@@ -188,6 +192,7 @@ def _torch_multiscale_deformable_attention(
     sampling_locations: torch.Tensor,
     attention_weights: torch.Tensor,
     padding_mode: Literal["border", "zeros"],
+    align_corners: bool,
 ) -> torch.Tensor:
     
     batch_size, _, num_heads, hidden_dim = value.shape
@@ -216,7 +221,7 @@ def _torch_multiscale_deformable_attention(
         
         # batch_size*num_heads, hidden_dim, num_queries, num_points
         sampling_value_l_ = F.grid_sample(
-            value_l_, sampling_grid_l_, mode="bilinear", align_corners=True, padding_mode=padding_mode
+            value_l_, sampling_grid_l_, mode="bilinear", align_corners=align_corners, padding_mode=padding_mode
         )
         sampling_value_list.append(sampling_value_l_)
     
