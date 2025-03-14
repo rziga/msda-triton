@@ -17,7 +17,7 @@ The results are also in line with the [original CUDA implementation](https://git
 Running the same benchmark for CUDA, I get:
 * FWD with 10k queries: 5.37 ms in CUDA vs. 4.81 ms in Triton.
 * FWD+BWD with 10k queries: 28.04 ms in CUDA vs. 24.95 ms in Triton.
-* Memory with 10k queries: 166.14 MB in CUDA vs 166.14 MB in Triton.
+* Memory with 10k queries: 166.14 MB in CUDA vs. 166.14 MB in Triton (same).
 
 *Results obtained on my RTX 2060 (gpu poor).*
 
