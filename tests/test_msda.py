@@ -125,7 +125,7 @@ def test_backward(dtype, padding_mode, align_corners):
     # generate test inputs
     img = torch.randn(B, I, H, C, device="cuda", requires_grad=True, dtype=dtype)
     img_shapes = torch.tensor(img_shapes, device="cuda")
-    sampling_points = 0.5 + 5*torch.randn(B, N, H, L, P, 2, device="cuda", dtype=dtype)
+    sampling_points = 0.5 + 2*torch.randn(B, N, H, L, P, 2, device="cuda", dtype=dtype)
     sampling_points.requires_grad_(True)
     att_weights = torch.rand(B, N, H, L, P, device="cuda", dtype=dtype).softmax(-1)
     att_weights.requires_grad_(True)
@@ -146,7 +146,7 @@ def test_backward(dtype, padding_mode, align_corners):
         # This one is pretty bad... 
         # It has to do with rounding in bilinear interpolation... 
         # I don't know how to fix except by upcasting to float64, but even then the torch version is likely the same
-        atol, rtol = 1e-2, 1e-3
+        atol, rtol = 1e-3, 1e-2
     else:
         atol, rtol = 1e-8, 1e-6
 

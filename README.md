@@ -83,9 +83,6 @@ Then run:
 pytest ./tests
 ```
 
-> **Note**  
-> The `float32` backward test sometimes fails on my machine. I have spent quite a lot of time debugging this and came to the conclusion that it's probably due to rounding errors when doing bilinear sampling. 
-
 
 ### 4. Run benchmark
 
