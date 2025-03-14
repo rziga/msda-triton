@@ -19,7 +19,7 @@ def native_multiscale_deformable_attention(
     padding_mode: Literal["border", "zeros"],
     align_corners: bool,
 ) -> torch.Tensor:
-    B, I, H, C = img.shape
+    B, I, H, C = img.shape  # noqa: E741
     B, N, H, L, P, _ = sampling_points.shape
 
     # split the image into levels
@@ -77,9 +77,11 @@ def multiscale_deformable_attention(
     Args:
         img (torch.Tensor): Flattened image pyramid tensor of shape `[batch_size, num_image, num_head, num_channel]`, where `num_image=sum(h[i]*w[i] for i in range(levels))`
         img_shapes (torch.Tensor): Shapes of each pyramid level tensor of shape `[num_levels, 2]`, in (height, width) order.
-        sampling_points (torch.Tensor): Sampling points tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points, 2]`, in (x, y) order, where x and y in [0-1]. 
+        sampling_points (torch.Tensor): Sampling points tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points, 2]`, in (x, y) order, where x and y are normalized to [0, 1] and (0, 0) is top-left corner and (1, 1) is bottom right corner. 
         attention_weights (torch.Tensor): Attention weights tensor of shape `[batch_size, num_queries, num_heads, num_levels, num_points]`.
-    
+        padding_mode (Literal["border", "zeros"]): Determines how to handle out-of-bounds (OOB) samples. `border` sets the OOB samples to closest image pixel; `zeros` sets the OOB samples to 0.
+        align_corners (bool): Determines the grid alignment of the image. See: https://discuss.pytorch.org/t/what-we-should-use-align-corners-false/22663/9 for illustration.
+
     Returns:
         output (torch.Tensor): Output tensor of shape `[batch_size, num_queries, num_heads, num_channels]`.
     """
@@ -92,8 +94,39 @@ def multiscale_deformable_attention(
 
 
 class MultiscaleDeformableAttention(nn.Module):
+    """
+    Multiscale deformable attention module.
 
-    def __init__(self, emb_dim, hidden_dim, num_levels, num_heads, num_points, padding_mode: Literal["border", "zeros"], align_corners: bool):
+    It handles input and output projections along with performing the actual multiscale deformable attention operation.
+    See: Figure 2. in https://arxiv.org/pdf/2010.04159 for illustration.
+
+    Args:
+        emb_dim (int): Feature dimension of inputs.
+        hidden_dim (int): Feature dimension to which to project. Must be divisible by `num_heads`.
+        num_levels (int): Number of feature levels of input images.
+        num_heads (int): Number of attention heads. Must divide `hidden_dim`.
+        num_points (int): Number of points.
+        padding_mode (Literal["border", "zeros"]): Determines how to handle out-of-bounds (OOB) samples. `border` sets the OOB samples to closest image pixel; `zeros` sets the OOB samples to 0.
+        align_corners (bool): Determines the grid alignment of the image. See: https://discuss.pytorch.org/t/what-we-should-use-align-corners-false/22663/9 for illustration.
+
+    Returns:
+        output (torch.Tensor): Output tensor of shape `[batch_size, num_queries, num_heads, num_channels]`.
+
+    Raises:
+        ValueError: If `hidden_dim` is not divisible by `num_heads`.
+    """
+
+
+    def __init__(
+        self,
+        emb_dim: int,
+        hidden_dim: int,
+        num_levels: int,
+        num_heads: int,
+        num_points: int,
+        padding_mode: Literal["border", "zeros"],
+        align_corners: bool,
+    ):
         super().__init__()
 
         if hidden_dim % num_heads != 0:
@@ -127,12 +160,12 @@ class MultiscaleDeformableAttention(nn.Module):
             img (torch.Tensor): Flattened image pyramid - tensor of shape `[batch_size, num_image, num_channels]`, where `num_image` is the total pixel count for all levels.
             img_shapes (torch.Tensor): 2D shapes of the feature pyramid levels - tensor of shape `[num_levels, 2]`.
             queries (torch.Tensor): Latent queries - tensor of shape `[batch_size, num_queries, num_channels]` which are projected for sampling offsets and attention weights.
-            reference_points (torch.Tensor): XY positions of queries - tensor of shape `[batch_size, num_queries, 2]` or `[batch_size, num_queries, 4]`.
+            reference_points (torch.Tensor): XY positions of queries - tensor of shape `[batch_size, num_queries, 2]` or `[batch_size, num_queries, 4]`. In (x, y) or (cx, cy, w, h) order, where x and y are normalized to [0, 1] and (0, 0) is top-left corner and (1, 1) is bottom right corner.
 
         Returns:
             output (torch.Tensor): Samples aggregated based on attention weights of shape `[batch_size, num_queries, num_channels]`.
         """
-        B, I, _ = img.shape
+        B, I, _ = img.shape  # noqa: E741
         B, N, _ = queries.shape
         L, H, P = self.num_levels, self.num_heads, self.num_points
         C = self.hidden_dim

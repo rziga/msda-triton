@@ -14,18 +14,30 @@ Here is a performance comparison with the PyTorch-native multiscale deformable a
 </p>
 
 The results are also in line with the [original CUDA implementation](https://github.com/fundamentalvision/Deformable-DETR/tree/main/models/ops) from deformable DETR.
-Running the same benchmark for CUDA I get:
+Running the same benchmark for CUDA, I get:
 * FWD with 10k queries: 5.37 ms in CUDA vs. 4.81 ms in Triton.
 * FWD+BWD with 10k queries: 28.04 ms in CUDA vs. 24.95 ms in Triton.
 * Memory with 10k queries: 166.14 MB in CUDA vs 166.14 MB in Triton.
 
 *Results obtained on my RTX 2060 (gpu poor).*
 
-> **Note**
-> This version uses `padding_mode = "border"`, while the original version uses `padding_mode = "zeros"`, so they are likely not 1-1 compatible.
+
+## Detection Example
+
+Replacing the original implementation with this kernel in a Deformable DETR-like model yields the same results.
+
+*Model: [Grounding DINO](https://huggingface.co/docs/transformers/model_doc/grounding-dino), Image source: [COCO](http://images.cocodataset.org/val2017/000000039769.jpg)*
+
+<p align="center">
+  <img src="assets/images/torch_cats.png" width="45%" />
+  <img src="assets/images/triton_cats.png" width="45%" />
+</p>
+
+> **Note**  
+> The original version uses `padding_mode="zeros"` and `align_corners=False`. Make sure you match these arguments when using this implementation.
+
 
 ## Installation
-
 
 ### 1. Install PyTorch & Triton
 
@@ -56,7 +68,7 @@ git clone https://github.com/rziga/msda-triton
 cd msda-triton
 ```
 
-and install using `pip`:
+and install via `pip`:
 ```sh
 pip install .
 ```
@@ -83,26 +95,108 @@ Then run:
 ```sh
 python scripts/benchmark.py
 ```
-The results will be printed in terminal and saved in `outputs/benchmakr_resuls` folder.
+The results will be printed in terminal and saved in `outputs/benchmark_results` folder.
 
 
-### Debugging
+### 5. Debugging
 
 Since triton can be pretty finnicky, I also provide the dependencies that I used for development.
 
-Using `pip`:
+Install via `pip`:
 ```sh
 pip install -e .[dev]
 ```
-or using `uv`:
+
+or with `uv`:
 ```sh
 uv sync --dev
 ```
 
 
+## Usage
+
+The package exposes two things:
+
+1) `multiscale_deformable_attention` - a differentiable PyTorch function defining the multiscale deformable attention operator proposed in [Deformable DETR](https://arxiv.org/abs/2010.04159). Usage:
+
+```py
+import torch
+from msda_triton import multiscale_deformable_attention
+
+# input params
+batch = 2
+head_dim = 32
+num_queries = 900
+num_heads  = 8
+num_points = 4
+img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]
+num_pixels = sum(h * w for h, w in img_shapes)
+num_levels = len(img_shapes)
+device = "cuda" # "cpu" uses fallback native torch version
+
+# generate random inputs
+img = torch.randn(batch, num_pixels, num_heads, head_dim, device=device)
+img_shapes = torch.tensor(img_shapes, device=device)
+sampling_points = torch.rand(batch, num_queries, num_heads, num_levels, num_points, 2, device=device)
+attention_weights = torch.rand(batch, num_queries, num_heads, num_levels, num_points, device=device)
+padding_mode = "zeros" # or "border"
+align_corners = False # or True
+
+# perform MSDA
+output = multiscale_deformable_attention(
+    img, img_shapes, sampling_points, attention_weights,
+    padding_mode, align_corners,
+)
+
+assert output.shape == (batch, num_queries, num_heads, head_dim)
+```
+
+2) `MultiscaleDeformableAttention` - a PyTorch `nn.Module`, which also handles the input and output projections. Usage:
+
+```py
+import torch
+from msda_triton import MultiscaleDeformableAttention
+
+# input params
+batch = 2
+emb_dim = 256
+hidden_dim = 512
+num_queries = 900
+num_heads  = 8
+num_points = 4
+img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]
+num_pixels = sum(h * w for h, w in img_shapes)
+num_levels = len(img_shapes)
+device = "cuda" # "cpu" uses fallback native torch version
+
+# generate random inputs
+img = torch.randn(batch, num_pixels, emb_dim, device=device)
+img_shapes = torch.tensor(img_shapes, device=device)
+queries = torch.rand(batch, num_queries, emb_dim, device=device)
+reference_points = torch.rand(batch, num_queries, 2, device=device)
+
+# init module
+msda = MultiscaleDeformableAttention(
+    emb_dim,
+    hidden_dim,
+    num_levels,
+    num_heads,
+    num_points,
+    padding_mode="border", # or "zeros"
+    align_corners=True, # or False
+).to(device)
+
+# perform MSDA
+output = msda(img, img_shapes, queries, reference_points)
+
+assert output.shape == (batch, num_queries, emb_dim)
+```
+
+
 ## Contributing
 
-The kernels are very basic. This is pretty much my first experience with triton. I have tested the functions as much as I could, but there could still be some issues. Performance can definitely be improved. Feel free to open an issue and/or submit improvements.
+The kernels are quite basic, as this is my first experience with Triton. I have tested the functions as much as I could, but there could still be some issues. Performance can definitely be improved. Feel free to open an issue and/or submit improvements.
+
 
 ## License
 

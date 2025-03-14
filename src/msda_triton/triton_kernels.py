@@ -5,14 +5,24 @@ import triton
 from triton import language as tl
 
 
-# How this will go down is:
-#   - we will go batch by batch, query by query and head by head
+# Notation:
+#   - img: [B, I, H, C]
+#   - shapes: [L, 2]
+#   - sampling_points: [B, N, H, L, P, 2]
+#   - attention_weights: [B, N, H, L, P]
+#   - output: [B, N, H, C]
+#   and B - batch, I - img pyramid pixels, H - heads, C - head channels,
+#   L - img pyramid levels, P - points per level
+# How this goes down is:
+#   - very naive implementation -- no blocked dims or anything.
+#   - parallelize over batch, head and queries since they are independent 
 #   - (basically batch block size = 1, query block size = 1, head block size = 1)
-#   - that is we will calculate blocks over [B, N, H, ||| L, P]
-#   - that is B, N, H will be 1,1,1 parallelized and L, P will be blocked... ??? !!!
-# TODO: If we make N dimension blocked with block size >= 16, we can use tensor cores !!!
-#       I should probably profile this thing first, because I have a feeling that the whole thing IO bound due to bilinear sampling
-# TODO: this is essentially padding mode == border because I clamp the sampling points
+#   - that is, calculate blocks over [B, N, H, ||| L, P]
+#                                program axes <-|-> block axes
+# TODO: Autotune? But I would need a blocked dimension.
+# TODO: If we make N (query) dimension blocked with block size >= 16, we can maybe use tensor cores?
+#       I should probably profile this thing first before any attempts at this,
+#       because I have a feeling that the whole thing IO bound due to bilinear sampling.
 
 
 @triton.jit()
@@ -37,6 +47,7 @@ def load_shapes_and_level_offsets(
 
     return h, w, level_offsets
 
+
 @triton.jit()
 def make_sampling_points_block_ptr(
     sampling_points_ptr,
@@ -53,6 +64,7 @@ def make_sampling_points_block_ptr(
         block_shape=(1, 1, 1, BLOCK_SIZE_L, BLOCK_SIZE_P, 2),
         order=(0, 1, 2, 3, 4, 5)
     )
+
 
 @triton.jit()
 def make_attention_weights_block_ptr(
@@ -71,6 +83,7 @@ def make_attention_weights_block_ptr(
         order=(0, 1, 2, 3, 4),
     )
 
+
 @triton.jit()
 def make_output_block_ptr(
     out_ptr,
@@ -87,13 +100,14 @@ def make_output_block_ptr(
         order=(0, 1, 2, 3),
     )
 
+
 @triton.jit()
 def sample_bilinear(
     x, y, w, h, level_offsets,
 
     img_ptr,
 
-    B, I, C, N, H, L, P,
+    B, I, C, N, H, L, P,  # noqa: E741
 
     bid, nid, hid,
 
@@ -106,7 +120,7 @@ def sample_bilinear(
 
     RETURN_FOR_BACKWARD: tl.constexpr,
 ):
-    # unnormalize, make sure that w and h are not 0
+    # unnormalize coordinates
     # both [L, P]
     if ALIGN_CORNERS:
         x = x * (w[:, None] - 1)
@@ -149,6 +163,7 @@ def sample_bilinear(
     # calculate start offset for image
     img_offset = img_ptr + bid*I*H*C
 
+    # calculate ptr offsets
     # all [L, P, C]
     img00_offsets = (
         (level_offsets[:, None] + y0_c*w[:, None] + x0_c)[:, :, None] * H*C     # [L, P, 1]
@@ -171,6 +186,7 @@ def sample_bilinear(
         + tl.arange(0, BLOCK_SIZE_C)                                            #       [C]
     )
 
+    # load samples
     # all [L, P, C]
     img00 = tl.load(img_offset + img00_offsets, mask)
     img01 = tl.load(img_offset + img01_offsets, mask)
@@ -179,15 +195,20 @@ def sample_bilinear(
 
     # handle oob elements
     if PADDING_MODE == "border":
+        # all [L, P, C]
         img00_mask = mask
         img01_mask = mask
         img10_mask = mask
         img11_mask = mask
+    
     elif PADDING_MODE == "zeros":
+        # all [L, P, 1] & [L, P, C] -> [L, P, C]
         img00_mask = (y0_mask & x0_mask)[:, :, None] & mask
         img01_mask = (y0_mask & x1_mask)[:, :, None] & mask
         img10_mask = (y1_mask & x0_mask)[:, :, None] & mask
         img11_mask = (y1_mask & x1_mask)[:, :, None] & mask
+
+        # zero-out masked elements
         img00 = tl.where(img00_mask, img00, 0)
         img01 = tl.where(img01_mask, img01, 0)
         img10 = tl.where(img10_mask, img10, 0)
@@ -222,14 +243,17 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     sampling_points_ptr: tl.const,    # [B, N, H, | L, P, 2]
     attention_weights_ptr: tl.const,  # [B, N, H, | L, P]
     shapes_ptr: tl.const,             # [L, 2]
-    B, I, C, N, H, L, P,
+
+    B, I, C, N, H, L, P,  # noqa: E741
+
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
+
     PADDING_MODE: tl.constexpr,
     ALIGN_CORNERS: tl.constexpr,
 ):
-    # block ids
+    # program ids
     nid = tl.program_id(0)
     bid = tl.program_id(1)
     hid = tl.program_id(2)
@@ -248,6 +272,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
         bid, nid, hid,
         BLOCK_SIZE_L, BLOCK_SIZE_P,
     )
+    # [1, 1, 1, L, P, 2]
     sampling_points = tl.load(sampling_points_ptrs, padding_option="zero", boundary_check=(3, 4))
     # [L, P, 2]
     sampling_points = sampling_points.reshape(BLOCK_SIZE_L, BLOCK_SIZE_P, 2)
@@ -270,6 +295,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
     )
 
     # load the attention weights
+    # [1, 1, 1, L, P]
     attention_weights_ptrs = make_attention_weights_block_ptr(
         attention_weights_ptr,
         B, N, H, L, P,
@@ -304,7 +330,7 @@ def triton_multi_scale_deformable_attention_fwd(
     align_corners: bool,
 ) -> torch.Tensor:
 
-    B, I, H, C = img.shape
+    B, I, H, C = img.shape  # noqa: E741
     B, N, H, L, P, _ = sampling_points.shape
 
     # run the kernel
@@ -338,7 +364,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     attention_weights_ptr: tl.const,  # [B, N, H, L, P]
 
     shapes_ptr: tl.const,             # [L, 2]
-    B, I, C, N, H, L, P,
+    B, I, C, N, H, L, P,  # noqa: E741
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
@@ -346,7 +372,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     PADDING_MODE: tl.constexpr,
     ALIGN_CORNERS: tl.constexpr,
 ):
-    # block ids
+    # program ids
     nid = tl.program_id(0)
     bid = tl.program_id(1)
     hid = tl.program_id(2)
@@ -369,6 +395,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
         bid, nid, hid,
         BLOCK_SIZE_L, BLOCK_SIZE_P,
     )
+    # [1, 1, 1, L, P, 2]
     sampling_points = tl.load(sampling_points_ptrs, padding_option="zero", boundary_check=(3, 4))
     # [L, P, 2]
     sampling_points = sampling_points.reshape(BLOCK_SIZE_L, BLOCK_SIZE_P, 2)
@@ -396,6 +423,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     )
 
     # load the attention weights
+    # [1, 1, 1, L, P]
     attention_weights_ptrs = make_attention_weights_block_ptr(
         attention_weights_ptr,
         B, N, H, L, P,
@@ -412,6 +440,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     #################
 
     # load the output gradient
+    # [1, 1, 1, C]
     out_grad_ptrs = make_output_block_ptr(
         out_grad_ptr,
         B, N, H, C,
@@ -423,7 +452,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     # [C]
     out_grad = out_grad.reshape(BLOCK_SIZE_C)
 
-    # calculate and store att weights gradient
+    # calculate and store attention weights gradient
     # [1, C] * [L*P, C] sum -> [L*P]
     attention_weights_grad = tl.sum(out_grad[None, :] * samples, axis=1)
     # [1, 1, 1, L, P]
@@ -437,10 +466,10 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     tl.store(attention_weights_grad_ptrs, attention_weights_grad, boundary_check=(3, 4))
 
     # calculate sampling points grad
-
     # [L, P]
     attention_weights = attention_weights.reshape(BLOCK_SIZE_L, BLOCK_SIZE_P)
 
+    # recompute scale
     if ALIGN_CORNERS:
         x_scale = (w[:, None, None] - 1)
         y_scale = (h[:, None, None] - 1)
@@ -470,16 +499,16 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     )
     tl.store(sampling_points_grad_ptrs, sampling_points_grad, boundary_check=(3, 4))
 
-    # calculate and store img grad
-    # now we load the pixels
+    # find img start offset
     img_grad_offset = img_grad_ptr + bid*I*H*C
+    # calculate grad
     # all [L, P, C]
     img00_grad = out_grad * attention_weights[:, :, None] * (1-dy) * (1-dx)
     img01_grad = out_grad * attention_weights[:, :, None] * (1-dy) * (  dx)
     img10_grad = out_grad * attention_weights[:, :, None] * (  dy) * (1-dx)
     img11_grad = out_grad * attention_weights[:, :, None] * (  dy) * (  dx)
 
-    # store to output tensor
+    # store to output grad tensor
     # NOTE: atomic_add here since multiple queries can sample the same pixel
     tl.atomic_add(img_grad_offset + img00_offsets, img00_grad, img00_mask)
     tl.atomic_add(img_grad_offset + img01_offsets, img01_grad, img01_mask)
@@ -497,7 +526,7 @@ def triton_multi_scale_deformable_attention_bwd(
     align_corners: bool,
 ) -> torch.Tensor:
 
-    B, I, H, C = img.shape
+    B, I, H, C = img.shape  # noqa: E741
     B, N, H, L, P, _ = sampling_points.shape
 
     # init grad buffers

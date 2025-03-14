@@ -23,7 +23,7 @@ def test_triton_forward(dtype, padding_mode, align_corners):
     # define input dimensions
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
 
     # generate test inputs
     img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
@@ -55,7 +55,7 @@ def test_triton_forward_oob_sampling(dtype, padding_mode, align_corners):
     # define input dimensions
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
 
     # generate test inputs, random normal sampling points to go OOB
     img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
@@ -91,7 +91,7 @@ def test_native_forward(dtype, padding_mode, align_corners):
     # define input dimensions
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
 
     # generate test inputs
     img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
@@ -120,7 +120,7 @@ def test_backward(dtype, padding_mode, align_corners):
     B, H, C, L, N, P = 4, 8, 64, 4, 1234, 4
     #img_shapes = [(32, 32)]
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
 
     # generate test inputs
     img = torch.randn(B, I, H, C, device="cuda", requires_grad=True, dtype=dtype)
@@ -166,7 +166,7 @@ def test_backward(dtype, padding_mode, align_corners):
 def test_nnmodule(device, coors):
     B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
 
     # generate test inputs
     img = torch.randn(B, I, H*C, device=device)

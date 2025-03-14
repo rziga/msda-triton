@@ -9,23 +9,23 @@ from msda_triton.torch_frontend import (
 
 @triton.testing.perf_report(
 triton.testing.Benchmark(
-    x_names=["num_queries"],  # Argument names to use as an x-axis for the plot.
-    x_vals=[10, 100, 300, 900, 1000, 10000],  # Different possible values for `x_name`.
-    x_log=True,  # x axis is logarithmic.
-    line_arg="provider",  # Argument name whose value corresponds to a different line in the plot.
-    line_vals=["triton", "torch"],  # Possible values for `line_arg`.
-    line_names=["Triton", "Torch"],  # Label name for the lines.
-    styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="fwd runtime (ms)",  # Label name for the y-axis.
-    plot_name="msda fwd runtime (ms)",  # Name for the plot. Used also as a file name for saving the plot.
-    args={},  # Values for function arguments not in `x_names` and `y_name`.
+    x_names=["num_queries"],
+    x_vals=[10, 100, 300, 900, 1000, 10000],
+    x_log=True,
+    line_arg="provider",
+    line_vals=["triton", "torch"],
+    line_names=["Triton", "Torch"],
+    styles=[("blue", "-"), ("green", "-")],
+    ylabel="fwd runtime (ms)",
+    plot_name="msda fwd runtime (ms)",
+    args={},
 ))
 def benchmark_fwd(num_queries, provider):
     N = num_queries
     B, H, C, P = 4, 8, 32, 4
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]
     L = len(img_shapes)
-    I = sum(h * w for h, w in img_shapes)
+    I = sum(h * w for h, w in img_shapes) # noqa: E741
     dtype = torch.float32
     padding_mode = "border"
     align_corners = True
@@ -57,23 +57,23 @@ def benchmark_fwd(num_queries, provider):
 
 @triton.testing.perf_report(
 triton.testing.Benchmark(
-    x_names=["num_queries"],  # Argument names to use as an x-axis for the plot.
-    x_vals=[10, 100, 300, 900, 1000, 10000],  # Different possible values for `x_name`.
-    x_log=True,  # x axis is logarithmic.
-    line_arg="provider",  # Argument name whose value corresponds to a different line in the plot.
-    line_vals=["triton", "torch"],  # Possible values for `line_arg`.
-    line_names=["Triton", "Torch"],  # Label name for the lines.
-    styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="fwd+bwd runtime (ms)",  # Label name for the y-axis.
-    plot_name="msda fwd+bwd runtime (ms)",  # Name for the plot. Used also as a file name for saving the plot.
-    args={},  # Values for function arguments not in `x_names` and `y_name`.
+    x_names=["num_queries"],
+    x_vals=[10, 100, 300, 900, 1000, 10000],
+    x_log=True,
+    line_arg="provider",
+    line_vals=["triton", "torch"],
+    line_names=["Triton", "Torch"],
+    styles=[("blue", "-"), ("green", "-")],
+    ylabel="fwd+bwd runtime (ms)",
+    plot_name="msda fwd+bwd runtime (ms)",
+    args={},
 ))
 def benchmark_fwdbwd(num_queries, provider):
     N = num_queries
     B, H, C, P = 4, 8, 32, 4
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]
     L = len(img_shapes)
-    I = sum(h * w for h, w in img_shapes)
+    I = sum(h * w for h, w in img_shapes) # noqa: E741
     dtype = torch.float32
     padding_mode = "border"
     align_corners = True
@@ -109,23 +109,23 @@ def benchmark_fwdbwd(num_queries, provider):
 
 @triton.testing.perf_report(
 triton.testing.Benchmark(
-    x_names=["num_queries"],  # Argument names to use as an x-axis for the plot.
-    x_vals=[10, 100, 300, 900, 1000, 10000],  # Different possible values for `x_name`.
-    x_log=True,  # x axis is logarithmic.
-    line_arg="provider",  # Argument name whose value corresponds to a different line in the plot.
-    line_vals=["triton", "torch"],  # Possible values for `line_arg`.
-    line_names=["Triton", "Torch"],  # Label name for the lines.
-    styles=[("blue", "-"), ("green", "-")],  # Line styles.
-    ylabel="memory consumption (MB)",  # Label name for the y-axis.
-    plot_name="msda memory consumption (MB)",  # Name for the plot. Used also as a file name for saving the plot.
-    args={},  # Values for function arguments not in `x_names` and `y_name`.
+    x_names=["num_queries"],
+    x_vals=[10, 100, 300, 900, 1000, 10000],
+    x_log=True,
+    line_arg="provider",
+    line_vals=["triton", "torch"],
+    line_names=["Triton", "Torch"],
+    styles=[("blue", "-"), ("green", "-")],
+    ylabel="memory consumption (MB)",
+    plot_name="msda memory consumption (MB)",
+    args={},
 ))
 def benchmark_memory(num_queries, provider):
     N = num_queries
     B, H, C, P = 4, 8, 32, 4
     img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]
     L = len(img_shapes)
-    I = sum(h * w for h, w in img_shapes)
+    I = sum(h * w for h, w in img_shapes) # noqa: E741
     dtype = torch.float32
     padding_mode = "border"
     align_corners = True
