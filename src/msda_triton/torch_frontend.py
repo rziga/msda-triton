@@ -102,6 +102,7 @@ class MultiscaleDeformableAttention(nn.Module):
         self.num_levels = num_levels
         self.num_heads = num_heads
         self.num_points = num_points
+        self.hidden_dim = hidden_dim
         self.img_input_proj = nn.Linear(emb_dim, hidden_dim)
         self.query_input_proj = nn.Linear(emb_dim, num_heads*num_levels*num_points*3)
         self.query_output_proj = nn.Linear(hidden_dim, emb_dim)
@@ -131,9 +132,10 @@ class MultiscaleDeformableAttention(nn.Module):
         Returns:
             output (torch.Tensor): Samples aggregated based on attention weights of shape `[batch_size, num_queries, num_channels]`.
         """
-        B, I, C = img.shape
-        B, N, C = queries.shape
+        B, I, _ = img.shape
+        B, N, _ = queries.shape
         L, H, P = self.num_levels, self.num_heads, self.num_points
+        C = self.hidden_dim
 
         # project image
         img = (
