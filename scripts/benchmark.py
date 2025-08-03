@@ -1,7 +1,7 @@
 import triton
 import torch
 
-from msda_triton.torch_frontend import (
+from msda_triton.frontend import (
     native_multiscale_deformable_attention,
     triton_multiscale_deformable_attention,
 )

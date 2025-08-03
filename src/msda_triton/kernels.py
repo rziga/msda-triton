@@ -25,6 +25,22 @@ from triton import language as tl
 #       because I have a feeling that the whole thing IO bound due to bilinear sampling.
 
 
+###########
+# Helpers #
+###########
+
+@triton.jit()
+def maybe_upcast(x):
+    if x.dtype == tl.float16:
+        return x.cast(tl.float32)    
+    elif x.dtype == tl.float32:
+        return x
+    elif x.dtype == tl.float64:
+        return x
+    else:
+        raise ValueError(f"{x.dtype} is not supported.")
+
+
 @triton.jit()
 def load_shapes_and_level_offsets(
     shapes_ptr,
@@ -131,8 +147,8 @@ def sample_bilinear(
 
     # find neighbors
     # all [L, P]
-    x0 = tl.floor(x)
-    y0 = tl.floor(y)
+    x0 = tl.floor(maybe_upcast(x)).cast(x.dtype)
+    y0 = tl.floor(maybe_upcast(y)).cast(y.dtype)
     x1 = x0 + 1
     y1 = y0 + 1
 
@@ -236,6 +252,17 @@ def sample_bilinear(
     ) if RETURN_FOR_BACKWARD else samples
 
 
+################
+# Forward pass #
+################
+
+@triton.autotune(
+    configs=[
+        triton.Config(kwargs={}, num_warps=num_warps)
+        for num_warps in [2, 4, 8, 16]
+    ],
+    key=["C", "H", "L", "P", "PADDING_MODE", "ALIGN_CORNERS"],
+)
 @triton.jit()
 def triton_multi_scale_deformable_attention_fwd_kernel(
     out_ptr,                          # [B, N, H, | C]
@@ -352,6 +379,19 @@ def triton_multi_scale_deformable_attention_fwd(
     return out
 
 
+#################
+# Backward pass #
+#################
+
+
+@triton.autotune(
+    configs=[
+        triton.Config(kwargs={}, num_warps=num_warps)
+        for num_warps in [2, 4, 8, 16]
+    ],
+    key=["C", "H", "L", "P", "PADDING_MODE", "ALIGN_CORNERS"],
+    reset_to_zero=["img_grad_ptr"],
+)
 @triton.jit()
 def triton_multi_scale_deformable_attention_bwd_kernel(
     img_grad_ptr,               # [B, I, H, C]
@@ -362,9 +402,10 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     img_ptr: tl.const,                # [B, I, H, C]
     sampling_points_ptr: tl.const,    # [B, N, H, L, P, 2]
     attention_weights_ptr: tl.const,  # [B, N, H, L, P]
-
     shapes_ptr: tl.const,             # [L, 2]
+    
     B, I, C, N, H, L, P,  # noqa: E741
+    
     BLOCK_SIZE_C: tl.constexpr,
     BLOCK_SIZE_L: tl.constexpr,
     BLOCK_SIZE_P: tl.constexpr,
@@ -377,9 +418,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     bid = tl.program_id(1)
     hid = tl.program_id(2)
 
-    #####################
-    # RECOMPUTE FORWARD #
-    #####################
+    # --- recompute forward --- #
 
     # load shapes
     # [L, 2]
@@ -435,9 +474,7 @@ def triton_multi_scale_deformable_attention_bwd_kernel(
     # [L*P]
     attention_weights = attention_weights.reshape(BLOCK_SIZE_L*BLOCK_SIZE_P)
 
-    #################
-    # BACKWARD PASS #
-    #################
+    # --- start backward pass --- #
 
     # load the output gradient
     # [1, 1, 1, C]
