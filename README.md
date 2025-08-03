@@ -15,8 +15,8 @@ Here is a performance comparison with the PyTorch-native multiscale deformable a
 
 The results are also in line with the [original CUDA implementation](https://github.com/fundamentalvision/Deformable-DETR/tree/main/models/ops) from deformable DETR.
 Running the same benchmark for CUDA, I get:
-* FWD with 10k queries: 5.37 ms in CUDA vs. 4.81 ms in Triton.
-* FWD+BWD with 10k queries: 28.04 ms in CUDA vs. 24.95 ms in Triton.
+* FWD with 10k queries: 5.37 ms in CUDA vs. 3.78 ms in Triton (1.42x).
+* FWD+BWD with 10k queries: 28.04 ms in CUDA vs. 22.78 ms in Triton (1.23x).
 * Memory with 10k queries: 166.14 MB in CUDA vs. 166.14 MB in Triton (same).
 
 *Results obtained on my RTX 2060 (gpu poor).*
