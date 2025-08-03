@@ -5,14 +5,67 @@ import torch
 from torch.nn import functional as F
 import pytest
 
-from msda_triton.autograd_function import triton_multiscale_deformable_attention
-from msda_triton.torch_frontend import native_multiscale_deformable_attention, MultiscaleDeformableAttention
+from msda_triton.frontend import (
+    triton_multiscale_deformable_attention,
+    native_multiscale_deformable_attention,
+    MultiscaleDeformableAttention
+)
+
+
+DTYPE_TO_TOLERANCE = {
+    torch.float16: {
+        "fwd": (1e-1, 1e-1),
+    },
+    torch.float32: {
+        "fwd": (1e-4, 1e-3),
+        "bwd": (1e-3, 1e-2),
+    },
+    torch.float64: {
+        "fwd": (1e-8, 1e-8),
+        "bwd": (1e-8, 1e-8),
+    },
+}
+
+
+def get_functional_data(
+    B=4, H=8, C=32, L=4, N=1000, P=3,
+    device="cuda",
+    dtype=torch.float32,
+    return_grad=False,
+):
+    img_shapes = [(64 // 2**i, 64 // 2**i) for i in range(L)]
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
+    img = torch.randn(B, I, H, C, device=device, dtype=dtype)
+    img_shapes = torch.tensor(img_shapes).to(device)
+    sampling_points = torch.rand(B, N, H, L, P, 2, device=device, dtype=dtype)
+    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device=device, dtype=dtype), dim=-1)
+    out_grad = torch.rand(B, N, H, C, device="cuda", dtype=dtype)
+
+    if return_grad:
+        return img, img_shapes, sampling_points, att_weights, out_grad
+    else:
+        return img, img_shapes, sampling_points, att_weights
+
+
+def get_module_data(
+    B=4, C=256, L=4, N=1000, COOR=4,
+    device="cuda",
+    dtype=torch.float32,
+):
+    img_shapes = [(64 // 2**i, 64 // 2**i) for i in range(L)]
+    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
+    img = torch.randn(B, I, C, device=device, dtype=dtype)
+    img_shapes = torch.tensor(img_shapes).to(device)
+    queries = torch.randn(B, N, C, device=device)
+    reference_points = torch.randn(B, N, COOR, device=device)
+
+    return img, img_shapes, queries, reference_points
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode,align_corners",
+    argnames=["dtype", "padding_mode", "align_corners"],
     argvalues=product(
-        ["float32", "float64"],
+        ["float16", "float32", "float64"],
         ["border", "zeros"],
         [True, False],
     )
@@ -20,31 +73,18 @@ from msda_triton.torch_frontend import native_multiscale_deformable_attention, M
 def test_triton_forward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
-    # define input dimensions
-    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
-    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
-
-    # generate test inputs
-    img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
-    img_shapes = torch.tensor(img_shapes).to("cuda")
-    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
-    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
-
+    img, img_shapes, sampling_points, att_weights = get_functional_data(device="cuda", dtype=dtype)
     true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
     test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
-    if dtype == torch.float32:
-        atol, rtol = 1e-4, 1e-5
-    else:
-        atol, rtol = 1e-8, 1e-6
+    atol, rtol = DTYPE_TO_TOLERANCE[dtype]["fwd"]
     torch.testing.assert_close(test, true, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode,align_corners",
+    argnames=["dtype", "padding_mode", "align_corners"],
     argvalues=product(
-        ["float32", "float64"],
+        ["float16", "float32", "float64"],
         ["border", "zeros"],
         [True, False],
     )
@@ -52,35 +92,18 @@ def test_triton_forward(dtype, padding_mode, align_corners):
 def test_triton_forward_oob_sampling(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
-    # define input dimensions
-    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
-    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
-
-    # generate test inputs, random normal sampling points to go OOB
-    img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
-    img_shapes = torch.tensor(img_shapes).to("cuda")
-    sampling_points = 0.5 + 2*torch.randn(B, N, H, L, P, 2, device="cuda", dtype=dtype)
-    #sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
-    #sampling_points[..., 0, 0, :] = 1 + 1/32
-    #sampling_points[..., 0, :, 0] = 1.01
-    #sampling_points[..., 0, :, 1] = 0.01
-    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
-
+    img, img_shapes, sampling_points, att_weights = get_functional_data(device="cuda", dtype=dtype)
     test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
     true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
-    if dtype == torch.float32:
-        atol, rtol = 1e-3, 1e-2
-    else:
-        atol, rtol = 1e-8, 1e-6
+    atol, rtol = DTYPE_TO_TOLERANCE[dtype]["fwd"]
     torch.testing.assert_close(test, true, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode,align_corners",
+    argnames=["dtype", "padding_mode", "align_corners"],
     argvalues=product(
-        ["float32", "float64"],
+        ["float16", "float32", "float64"],
         ["border", "zeros"],
         [True, False],
     )
@@ -88,17 +111,7 @@ def test_triton_forward_oob_sampling(dtype, padding_mode, align_corners):
 def test_native_forward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
-    # define input dimensions
-    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
-    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
-
-    # generate test inputs
-    img = torch.randn(B, I, H, C, device="cuda", dtype=dtype)
-    img_shapes = torch.tensor(img_shapes, device="cuda")
-    sampling_points = torch.rand(B, N, H, L, P, 2, device="cuda", dtype=dtype)
-    att_weights = torch.softmax(torch.randn(B, N, H, L, P, device="cuda", dtype=dtype), dim=-1)
-
+    img, img_shapes, sampling_points, att_weights = get_functional_data(device="cuda", dtype=dtype)
     true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
     test = native_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
 
@@ -106,7 +119,7 @@ def test_native_forward(dtype, padding_mode, align_corners):
 
 
 @pytest.mark.parametrize(
-    argnames="dtype,padding_mode,align_corners",
+    argnames=["dtype", "padding_mode", "align_corners"],
     argvalues=product(
         ["float32", "float64"],
         ["border", "zeros"],
@@ -116,44 +129,26 @@ def test_native_forward(dtype, padding_mode, align_corners):
 def test_backward(dtype, padding_mode, align_corners):
     dtype = getattr(torch, dtype)
 
-    # define input dimensions
-    B, H, C, L, N, P = 4, 8, 64, 4, 1234, 4
-    #img_shapes = [(32, 32)]
-    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
-
-    # generate test inputs
-    img = torch.randn(B, I, H, C, device="cuda", requires_grad=True, dtype=dtype)
-    img_shapes = torch.tensor(img_shapes, device="cuda")
-    sampling_points = 0.5 + 2*torch.randn(B, N, H, L, P, 2, device="cuda", dtype=dtype)
-    sampling_points.requires_grad_(True)
-    att_weights = torch.rand(B, N, H, L, P, device="cuda", dtype=dtype).softmax(-1)
-    att_weights.requires_grad_(True)
-    out_grad = torch.rand(B, N, H, C, device="cuda", dtype=dtype)
+    img, img_shapes, sampling_points, att_weights, out_grad = get_functional_data(device="cuda", dtype=dtype, return_grad=True)
+    img, sampling_points, att_weights = map(lambda t: t.requires_grad_(True), (img, sampling_points, att_weights))
 
     # run torch
-    a = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
-    a.backward(out_grad)
-    a_img_grad, a_sampling_points_grad, a_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
+    true = torch_msda_bilinear(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
+    true.backward(out_grad)
+    true_img_grad, true_sampling_points_grad, true_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
-    b = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
-    b.backward(out_grad)
-    b_img_grad, b_sampling_points_grad, b_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
+    # run triton
+    test = triton_multiscale_deformable_attention(img, img_shapes, sampling_points, att_weights, padding_mode, align_corners)
+    test.backward(out_grad)
+    test_img_grad, test_sampling_points_grad, test_att_weights_grad = img.grad, sampling_points.grad, att_weights.grad
     img.grad, sampling_points.grad, att_weights.grad = None, None, None
 
-    if dtype == torch.float32:
-        # This one is pretty bad... 
-        # It has to do with rounding in bilinear interpolation... 
-        # I don't know how to fix except by upcasting to float64, but even then the torch version is likely the same
-        atol, rtol = 1e-3, 1e-2
-    else:
-        atol, rtol = 1e-8, 1e-6
-
-    torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
-    torch.testing.assert_close(a_img_grad, b_img_grad, atol=atol, rtol=rtol)
-    torch.testing.assert_close(a_sampling_points_grad, b_sampling_points_grad, atol=atol, rtol=rtol)
-    torch.testing.assert_close(a_att_weights_grad, b_att_weights_grad, atol=atol, rtol=rtol)
+    atol, rtol = DTYPE_TO_TOLERANCE[dtype]["bwd"]
+    torch.testing.assert_close(true, test, atol=atol, rtol=rtol)
+    torch.testing.assert_close(true_img_grad, test_img_grad, atol=atol, rtol=rtol)
+    torch.testing.assert_close(true_sampling_points_grad, test_sampling_points_grad, atol=atol, rtol=rtol)
+    torch.testing.assert_close(true_att_weights_grad, test_att_weights_grad, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(
@@ -164,18 +159,27 @@ def test_backward(dtype, padding_mode, align_corners):
     )
 )
 def test_nnmodule(device, coors):
-    B, H, C, L, N, P = 4, 8, 32, 4, 1000, 3
-    img_shapes = [(64, 64), (32, 32), (16, 16), (8, 8)]  # Ensure sum(h*w) = I
-    I = sum(h * w for h, w in img_shapes)  # Total pixels across scales  # noqa: E741
-
-    # generate test inputs
-    img = torch.randn(B, I, H*C, device=device)
-    img_shapes = torch.tensor(img_shapes).to(device)
-    queries = torch.rand(B, N, H*C, device=device)
-    reference_points = torch.rand(B, N, coors, device=device)
-
-    module = MultiscaleDeformableAttention(H*C, H*C, L, H, P, padding_mode="border", align_corners=True).to(device)
+    channels, heads, levels, points = 256, 8, 4, 8
+    img, img_shapes, queries, reference_points = get_module_data(B=4, C=channels, N=1000, COOR=coors, device=device)
+    module = MultiscaleDeformableAttention(
+        channels, channels//heads, levels, heads, points,
+        padding_mode="border", align_corners=True
+    ).to(device)
     module.forward(img, img_shapes, queries, reference_points)
+
+
+@pytest.mark.parametrize(
+    argnames="dtype",
+    argvalues=["float16", "float32", "float64"]
+)
+def test_autocast(dtype):
+    dtype = getattr(torch, dtype)
+
+    img, img_shapes, sampling_points, att_weights = get_functional_data(device="cuda", dtype=dtype)
+
+    with torch.amp.autocast(device_type="cuda", dtype=dtype):
+        _ = triton_multiscale_deformable_attention(
+           img, img_shapes, sampling_points, att_weights, padding_mode="zeros", align_corners=False)
 
 
 #############################
