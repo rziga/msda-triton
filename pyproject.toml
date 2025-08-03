@@ -1,6 +1,6 @@
 [project]
 name = "msda-triton"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multiscale deformable attention kernels in Triton with PyTorch interface."
 readme = "README.md"
 authors = [
