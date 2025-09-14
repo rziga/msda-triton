@@ -252,6 +252,98 @@ def sample_bilinear(
     ) if RETURN_FOR_BACKWARD else samples
 
 
+@triton.jit()
+def sample_nearest(
+    x, y, w, h, level_offsets,
+
+    img_ptr,
+
+    B, I, C, N, H, L, P,  # noqa: E741
+
+    bid, nid, hid,
+
+    BLOCK_SIZE_L: tl.constexpr,
+    BLOCK_SIZE_P: tl.constexpr,
+    BLOCK_SIZE_C: tl.constexpr,
+
+    PADDING_MODE: tl.constexpr,
+    ALIGN_CORNERS: tl.constexpr,
+
+    RETURN_FOR_BACKWARD: tl.constexpr,
+):
+    # backward for sample nearest is not supported
+    # because there would be no gradient for x and y
+    #tl.static_assert(
+    #    not RETURN_FOR_BACKWARD,
+    #    msg="Backprop for nearest sampling is not supported."
+    #)
+
+    # unnormalize coordinates
+    # both [L, P]
+    if ALIGN_CORNERS:
+        x = x * (w[:, None] - 1)
+        y = y * (h[:, None] - 1)
+    else:
+        x = x * w[:, None] - 0.5
+        y = y * h[:, None] - 0.5
+
+    # find nearest point
+    # all [L, P]
+    x = tl.floor(maybe_upcast(x)+0.5).cast(x.dtype)
+    y = tl.floor(maybe_upcast(y)+0.5).cast(y.dtype)
+
+    # calculate mask for zeroing out elements
+    if PADDING_MODE == "border":
+        pass
+    elif PADDING_MODE == "zeros":
+        x_mask = (0 <= x) & (x <= (w[:, None] - 1))
+        y_mask = (0 <= y) & (y <= (h[:, None] - 1))
+
+    # clamp them
+    # all [L, P]
+    x_c = tl.clamp(x, 0, w[:, None] - 1).to(tl.int32)
+    y_c = tl.clamp(y, 0, h[:, None] - 1).to(tl.int32)
+
+    # calculate mask
+    # [L, P, C]
+    mask = (
+          (tl.arange(0, BLOCK_SIZE_L)[:, None, None] < L)
+        & (tl.arange(0, BLOCK_SIZE_P)[None, :, None] < P)
+        & (tl.arange(0, BLOCK_SIZE_C)[None, None, :] < C) 
+    )
+
+    # calculate start offset for image
+    img_offset = img_ptr + bid*I*H*C
+
+    # calculate img ptr offsets
+    # [L, P, C]
+    img_offsets = (
+        (level_offsets[:, None] + y_c*w[:, None] + x_c)[:, :, None] * H*C # [L, P, 1]
+        + hid*C                                                           #       [1]
+        + tl.arange(0, BLOCK_SIZE_C)                                      #       [C]
+    )
+
+    # load sample
+    # [L, P, C]
+    img = tl.load(img_offset + img_offsets, mask)
+
+    # handle oob elements
+    if PADDING_MODE == "border":
+        # [L, P, C]
+        img_mask = mask
+    elif PADDING_MODE == "zeros":
+        # [L, P, 1] & [L, P, C] -> [L, P, C]
+        img_mask = (y_mask & x_mask)[:, :, None] & mask
+        # zero-out masked elements
+        img = tl.where(img_mask, img, 0)
+    
+    # samples are directly image locations
+    # [L, P, C] -> [L*P, C]
+    samples = img.reshape(BLOCK_SIZE_L*BLOCK_SIZE_P, BLOCK_SIZE_C)
+
+    return samples
+
+
 ################
 # Forward pass #
 ################
@@ -261,7 +353,7 @@ def sample_bilinear(
         triton.Config(kwargs={}, num_warps=num_warps)
         for num_warps in [2, 4, 8, 16]
     ],
-    key=["C", "H", "L", "P", "PADDING_MODE", "ALIGN_CORNERS"],
+    key=["C", "H", "L", "P", "PADDING_MODE", "ALIGN_CORNERS", "SAMPLING_MODE"],
 )
 @triton.jit()
 def triton_multi_scale_deformable_attention_fwd_kernel(
@@ -279,6 +371,7 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
 
     PADDING_MODE: tl.constexpr,
     ALIGN_CORNERS: tl.constexpr,
+    SAMPLING_MODE: tl.constexpr, # "bilinear" or "nearest"
 ):
     # program ids
     nid = tl.program_id(0)
@@ -310,16 +403,28 @@ def triton_multi_scale_deformable_attention_fwd_kernel(
 
     # bilinear sampling
     # [L*P, C]
-    samples = sample_bilinear(
-        x, y, w, h, level_offsets, 
-        img_ptr, 
-        B, I, C, N, H, L, P, 
-        bid, nid, hid, 
-        BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
-        PADDING_MODE,
-        ALIGN_CORNERS,
-        RETURN_FOR_BACKWARD=False,
-    )
+    if SAMPLING_MODE == "bilinear":
+        samples = sample_bilinear(
+            x, y, w, h, level_offsets, 
+            img_ptr, 
+            B, I, C, N, H, L, P, 
+            bid, nid, hid, 
+            BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+            PADDING_MODE,
+            ALIGN_CORNERS,
+            RETURN_FOR_BACKWARD=False,
+        )
+    elif SAMPLING_MODE == "nearest":
+        samples = sample_nearest(
+            x, y, w, h, level_offsets, 
+            img_ptr, 
+            B, I, C, N, H, L, P, 
+            bid, nid, hid, 
+            BLOCK_SIZE_L, BLOCK_SIZE_P, BLOCK_SIZE_C,
+            PADDING_MODE,
+            ALIGN_CORNERS,
+            RETURN_FOR_BACKWARD=False,
+        )
 
     # load the attention weights
     # [1, 1, 1, L, P]
@@ -353,6 +458,7 @@ def triton_multi_scale_deformable_attention_fwd(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    sampling_mode: Literal["bilinear", "nearest"],
     padding_mode: Literal["border", "zeros"],
     align_corners: bool,
 ) -> torch.Tensor:
@@ -374,6 +480,7 @@ def triton_multi_scale_deformable_attention_fwd(
         triton.next_power_of_2(P),
         padding_mode,
         align_corners,
+        sampling_mode,
     )
 
     return out

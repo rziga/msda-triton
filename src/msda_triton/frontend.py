@@ -17,6 +17,7 @@ def native_multiscale_deformable_attention(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    sampling_mode: Literal["bilinear", "nearest"],
     padding_mode: Literal["border", "zeros"],
     align_corners: bool,
 ) -> torch.Tensor:
@@ -52,7 +53,9 @@ def native_multiscale_deformable_attention(
         # sample
         samples_level = F.grid_sample(
             img_level, points_level,
-            mode="bilinear", align_corners=align_corners, padding_mode=padding_mode
+            mode=sampling_mode,
+            align_corners=align_corners,
+            padding_mode=padding_mode,
         )
         samples_level = (
             samples_level # [B*H, C, N, P]
@@ -73,6 +76,7 @@ def triton_multiscale_deformable_attention(
     img_shapes: torch.Tensor,
     sampling_points: torch.Tensor,
     attention_weights: torch.Tensor,
+    sampling_mode: Literal["bilinear", "nearest"],
     padding_mode: Literal["border", "zeros"],
     align_corners: bool,
 ) -> torch.Tensor:
@@ -100,6 +104,7 @@ def triton_multiscale_deformable_attention(
         img_shapes,
         sampling_points,
         attention_weights,
+        sampling_mode,
         padding_mode,
         align_corners,
     )
@@ -115,6 +120,7 @@ class _TritonMultiscaleDeformableAttentionFunction(Function):
         img_shapes: torch.Tensor,
         sampling_points: torch.Tensor,
         attention_weights: torch.Tensor,
+        sampling_mode: Literal["bilinear", "nearest"],
         padding_mode: Literal["border", "zeros"],
         align_corners: bool,
     ) -> torch.Tensor:
@@ -122,7 +128,7 @@ class _TritonMultiscaleDeformableAttentionFunction(Function):
         ctx.padding_mode = padding_mode
         ctx.align_corners = align_corners
         out = triton_multi_scale_deformable_attention_fwd(
-            img, img_shapes, sampling_points, attention_weights, padding_mode, align_corners
+            img, img_shapes, sampling_points, attention_weights, sampling_mode, padding_mode, align_corners
         )
         return out
 
@@ -139,7 +145,7 @@ class _TritonMultiscaleDeformableAttentionFunction(Function):
         img_grad, sampling_points_grad, attention_weights_grad = triton_multi_scale_deformable_attention_bwd(
             out_grad, img, img_shapes, sampling_points, attention_weights, padding_mode, align_corners
         )
-        return img_grad, None, sampling_points_grad, attention_weights_grad, None, None
+        return img_grad, None, sampling_points_grad, attention_weights_grad, None, None, None
 
 
 def multiscale_deformable_attention(
@@ -149,6 +155,7 @@ def multiscale_deformable_attention(
     attention_weights: torch.Tensor,
     padding_mode: Literal["border", "zeros"],
     align_corners: bool,
+    sampling_mode: Literal["bilinear", "nearest"],
 ) -> torch.Tensor:
     """
     Differentiable multiscale deformable attention function.
@@ -166,10 +173,10 @@ def multiscale_deformable_attention(
     """
     try:
         return triton_multiscale_deformable_attention(
-            img, img_shapes, sampling_points, attention_weights, padding_mode, align_corners)
+            img, img_shapes, sampling_points, attention_weights, sampling_mode, padding_mode, align_corners)
     except Exception:
         return native_multiscale_deformable_attention(
-            img, img_shapes, sampling_points, attention_weights, padding_mode, align_corners)
+            img, img_shapes, sampling_points, attention_weights, sampling_mode, padding_mode, align_corners)
 
 
 class MultiscaleDeformableAttention(nn.Module):
@@ -203,6 +210,7 @@ class MultiscaleDeformableAttention(nn.Module):
         num_levels: int,
         num_heads: int,
         num_points: int,
+        sampling_mode: Literal["bilinear", "nearest"],
         padding_mode: Literal["border", "zeros"],
         align_corners: bool,
     ):
@@ -219,6 +227,7 @@ class MultiscaleDeformableAttention(nn.Module):
         self.query_input_proj = nn.Linear(emb_dim, num_heads*num_levels*num_points*3)
         self.query_output_proj = nn.Linear(hidden_dim, emb_dim)
 
+        self.sampling_mode = sampling_mode
         self.padding_mode = padding_mode
         self.align_corners = align_corners
 
@@ -286,7 +295,7 @@ class MultiscaleDeformableAttention(nn.Module):
         # deformable attention
         # [B, N, H, C//H] -> [B, N, C]
         out = multiscale_deformable_attention(
-            img, img_shapes, sampling_points, attention_weights, self.padding_mode, self.align_corners)
+            img, img_shapes, sampling_points, attention_weights, self.padding_mode, self.align_corners, self.sampling_mode)
         out = out.reshape(B, N, C)
         out = self.query_output_proj(out)
         return out

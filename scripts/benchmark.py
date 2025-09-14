@@ -38,15 +38,15 @@ def benchmark_fwd(num_queries, provider):
     quantiles = [0.5, 0.2, 0.8]
     if provider == "triton":
         def run():
-            with torch.no_grad():
+            with torch.inference_mode():
                 triton_multiscale_deformable_attention(
-                    img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                    img, img_shapes, sampling_points, att_weights, "nearest", padding_mode, align_corners
                 )
     if provider == "torch":
         def run():
-            with torch.no_grad():
+            with torch.inference_mode():
                 native_multiscale_deformable_attention(
-                    img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                    img, img_shapes, sampling_points, att_weights, "nearest", padding_mode, align_corners
                 )
 
     output = triton.testing.do_bench(
@@ -88,7 +88,7 @@ def benchmark_fwdbwd(num_queries, provider):
     if provider == "triton":
         def run():
             out = triton_multiscale_deformable_attention(
-                img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                img, img_shapes, sampling_points, att_weights, "bilinear", padding_mode, align_corners
             )
             out.backward(torch.rand_like(out))
             img.grad = sampling_points.grad = att_weights.grad = None
@@ -96,7 +96,7 @@ def benchmark_fwdbwd(num_queries, provider):
     if provider == "torch":
         def run():
             out = native_multiscale_deformable_attention(
-                img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                img, img_shapes, sampling_points, att_weights, "bilinear", padding_mode, align_corners
             )
             out.backward(torch.rand_like(out))
             img.grad = sampling_points.grad = att_weights.grad = None
@@ -139,7 +139,7 @@ def benchmark_memory(num_queries, provider):
     if provider == "triton":
         def run():
             out = triton_multiscale_deformable_attention(
-                img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                img, img_shapes, sampling_points, att_weights, "bilinear", padding_mode, align_corners
             )
             out.backward(torch.rand_like(out))
             img.grad = sampling_points.grad = att_weights.grad = None
@@ -147,7 +147,7 @@ def benchmark_memory(num_queries, provider):
     if provider == "torch":
         def run():
             out = native_multiscale_deformable_attention(
-                img, img_shapes, sampling_points, att_weights, padding_mode, align_corners
+                img, img_shapes, sampling_points, att_weights, "bilinear", padding_mode, align_corners
             )
             out.backward(torch.rand_like(out))
             img.grad = sampling_points.grad = att_weights.grad = None
